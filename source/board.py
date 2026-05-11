@@ -106,18 +106,3 @@ class Board:
             row_str = " ".join(symbols[self.grid[r, c]] for c in range(self.size))
             print(f"{r} {row_str}")
         print(f"Lượt kế tiếp: {symbols[self.current_player]}")
-
-if __name__ == "__main__":
-    # Test nhanh logic
-    b = Board(9)
-    b.make_move(4, 4)
-    b.make_move(0, 0)
-    b.make_move(4, 5)
-    b.make_move(1, 1)
-    b.make_move(4, 6)
-    b.make_move(2, 2)
-    b.make_move(4, 7)
-    b.make_move(3, 3)
-    b.make_move(4, 8) # X thắng hàng ngang
-    b.display()
-    print("Kết quả:", b.check_win())
