@@ -1,6 +1,17 @@
 from source.board import Board, PLAYER, AI
 
-board = Board()
+# ── Nhập kích thước bàn cờ ───────────────────────────────────
+while True:
+    try:
+        size = int(input("Nhập kích thước bàn cờ (10-15): "))
+        if 10 <= size <= 15:
+            break
+        print("Lỗi: Kích thước phải trong khoảng 10 đến 15!")
+    except ValueError:
+        print("Lỗi: Vui lòng nhập số nguyên!")
+
+# ── Bắt đầu game ─────────────────────────────────────────────
+board = Board(size)
 current_player = PLAYER  # X đi trước
 
 while True:
@@ -8,8 +19,8 @@ while True:
     print(f"Lượt của: {current_player}")
 
     try:
-        row = int(input("Nhập hàng (0-9): "))
-        col = int(input("Nhập cột (0-9): "))
+        row = int(input(f"Nhập hàng (0-{size - 1}): "))
+        col = int(input(f"Nhập cột (0-{size - 1}): "))
     except ValueError:
         print("Lỗi: Vui lòng nhập số nguyên!")
         continue
