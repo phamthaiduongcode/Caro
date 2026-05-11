@@ -2,6 +2,10 @@ import math
 import numpy as np
 import time
 
+class SearchTimeout(Exception):
+    """Ngoại lệ tùy chỉnh để dừng tìm kiếm khi hết thời gian."""
+    pass
+
 class CaroAI:
     def __init__(self, player_id, depth=3, defense_multiplier=1.45):
         self.player_id = player_id           # 1 (X) hoặc 2 (O)
@@ -10,22 +14,25 @@ class CaroAI:
         self.defense_multiplier = defense_multiplier
         self.nodes_visited = 0
         self.center = 0
+        self.start_time = 0
+        self.time_limit = 0
 
-    def get_move(self, board, mode="alpha_beta"):
+    def get_move(self, board, mode="alpha_beta", time_limit=5.0):
         """
-        Hàm giao tiếp chính với GUI hoặc Benchmark.
+        Hàm giao tiếp chính với GUI hoặc Benchmark, hỗ trợ Iterative Deepening.
         Trả về: (best_move, best_score, nodes_visited, time_taken)
         """
         self.nodes_visited = 0
-        start_time = time.time()
+        self.start_time = time.time()
+        self.time_limit = time_limit
         
         # Cập nhật ID người chơi theo trạng thái hiện tại của bàn cờ
         self.player_id = board.current_player
         self.opp_id = 3 - self.player_id
         self.center = board.size / 2
         
-        best_score = -math.inf
-        best_move = None
+        final_best_move = None
+        final_best_score = -math.inf
         
         legal_moves = board.get_legal_moves()
         # Move Ordering: Ưu tiên duyệt các nước đi gần trung tâm bàn cờ trước
@@ -34,24 +41,57 @@ class CaroAI:
         if not legal_moves:
             return None, 0, 0, 0
 
-        for move in legal_moves:
-            board.make_move(*move)
-            if mode == "minimax":
-                score = self.minimax(board, self.depth - 1, False)
-            else: # alpha_beta
-                score = self.alpha_beta(board, self.depth - 1, -math.inf, math.inf, False)
-            board.undo_move()
+        # Iterative Deepening: Thử tìm kiếm sâu dần từ 1 đến self.depth
+        for current_depth in range(1, self.depth + 1):
+            depth_best_move = None
+            depth_best_score = -math.inf
             
-            if score > best_score:
-                best_score = score
-                best_move = move
+            try:
+                for move in legal_moves:
+                    # Kiểm tra thời gian trước mỗi nước đi ở tầng gốc
+                    if time.time() - self.start_time > self.time_limit:
+                        raise SearchTimeout()
+
+                    board.make_move(*move)
+                    if mode == "minimax":
+                        score = self.minimax(board, current_depth - 1, False)
+                    else: # alpha_beta
+                        score = self.alpha_beta(board, current_depth - 1, -math.inf, math.inf, False)
+                    board.undo_move()
+                    
+                    if score > depth_best_score:
+                        depth_best_score = score
+                        depth_best_move = move
                 
-        duration = time.time() - start_time
-        return best_move, best_score, self.nodes_visited, duration
+                # Chỉ cập nhật kết quả cuối cùng khi đã hoàn thành trọn vẹn một độ sâu
+                final_best_move = depth_best_move
+                final_best_score = depth_best_score
+                
+                # Cập nhật Move Ordering: Đưa nước đi tốt nhất vừa tìm được lên đầu 
+                # để tối ưu hóa việc cắt tỉa Alpha-Beta ở độ sâu (depth) tiếp theo.
+                if final_best_move in legal_moves:
+                    legal_moves.remove(final_best_move)
+                    legal_moves.insert(0, final_best_move)
+
+                # Nếu tìm thấy nước đi thắng tuyệt đối, ngừng tìm kiếm sâu hơn
+                if final_best_score >= 1000000:
+                    break
+            except SearchTimeout:
+                # Hết thời gian: Dừng tìm kiếm và trả về kết quả từ độ sâu hoàn thành gần nhất
+                break
+                
+        duration = time.time() - self.start_time
+        return final_best_move, final_best_score, self.nodes_visited, duration
 
     def alpha_beta(self, board, depth, alpha, beta, is_maximizing):
         """Thuật toán Minimax với cắt tỉa Alpha-Beta (Level 2)."""
         self.nodes_visited += 1
+        
+        # Kiểm tra giới hạn thời gian (kiểm tra mỗi 100 node để giảm overhead)
+        if self.nodes_visited % 100 == 0:
+            if time.time() - self.start_time > self.time_limit:
+                raise SearchTimeout()
+
         result = board.check_win()
         if result == self.player_id: return 1000000 + depth
         if result == self.opp_id: return -1000000 - depth
@@ -86,6 +126,11 @@ class CaroAI:
     def minimax(self, board, depth, is_maximizing):
         """Thuật toán Minimax thuần túy (Level 1)."""
         self.nodes_visited += 1
+        
+        if self.nodes_visited % 100 == 0:
+            if time.time() - self.start_time > self.time_limit:
+                raise SearchTimeout()
+
         result = board.check_win()
         if result == self.player_id: return 1000000 + depth
         if result == self.opp_id: return -1000000 - depth
