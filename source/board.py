@@ -1,6 +1,9 @@
 import numpy as np
 
 class Board:
+    # Tối ưu: Định nghĩa các hướng là hằng số để dùng chung, tránh khởi tạo lại nhiều lần
+    DIRECTIONS = [(0, 1), (1, 0), (1, 1), (1, -1)]  # Ngang, dọc, 2 chéo
+
     def __init__(self, size=9, win_condition=4):
         if size < 9:
             raise ValueError("Board size must be at least 9x9.")
@@ -53,22 +56,20 @@ class Board:
         return 0
 
     def _check_at(self, r, c) -> bool:
-        """Kiểm tra xem tại ô (r, c) có tạo thành chuỗi 4 quân không."""
+        """Kiểm tra xem tại ô (r, c) có tạo thành chuỗi thắng không."""
         player = self.grid[r, c]
-        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]  # Ngang, dọc, 2 chéo
-        
-        for dr, dc in directions:
+
+        for dr, dc in self.DIRECTIONS:
             count = 1
-            # Kiểm tra hai hướng ngược nhau
             for direction in [1, -1]:
                 nr, nc = r + dr * direction, c + dc * direction
                 while 0 <= nr < self.size and 0 <= nc < self.size and self.grid[nr, nc] == player:
                     count += 1
+                    # Early Exit: Thắng ngay lập tức khi đủ số quân liên tiếp
+                    if count >= self.win_condition:
+                        return True
                     nr += dr * direction
                     nc += dc * direction
-            
-            if count >= self.win_condition: 
-                return True
         return False
 
     def get_legal_moves(self) -> list:
@@ -106,18 +107,3 @@ class Board:
             row_str = " ".join(symbols[self.grid[r, c]] for c in range(self.size))
             print(f"{r} {row_str}")
         print(f"Lượt kế tiếp: {symbols[self.current_player]}")
-
-if __name__ == "__main__":
-    # Test nhanh logic
-    b = Board(9)
-    b.make_move(4, 4)
-    b.make_move(0, 0)
-    b.make_move(4, 5)
-    b.make_move(1, 1)
-    b.make_move(4, 6)
-    b.make_move(2, 2)
-    b.make_move(4, 7)
-    b.make_move(3, 3)
-    b.make_move(4, 8) # X thắng hàng ngang
-    b.display()
-    print("Kết quả:", b.check_win())
