@@ -8,14 +8,14 @@ while True:
     print(f"Lượt của: {current_player}")
 
     try:
-        row = int(input("Nhập hàng (0-8): "))
-        col = int(input("Nhập cột (0-8): "))
+        row = int(input("Nhập hàng (0-9): "))
+        col = int(input("Nhập cột (0-9): "))
     except ValueError:
-        print("Nhập số nguyên!")
+        print("Lỗi: Vui lòng nhập số nguyên!")
         continue
 
     if not board.is_valid_move(row, col):
-        print("Ô không hợp lệ, thử lại!")
+        print("Lỗi: Ô không hợp lệ hoặc đã có quân, thử lại!")
         continue
 
     board.make_move(row, col, current_player)
