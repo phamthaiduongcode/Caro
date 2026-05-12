@@ -1,4 +1,5 @@
 import numpy as np
+import random
 
 class Board:
     # Tối ưu: Định nghĩa các hướng là hằng số để dùng chung, tránh khởi tạo lại nhiều lần
@@ -12,17 +13,30 @@ class Board:
         self.grid = np.zeros((size, size), dtype=int)  # 0: empty, 1: X, 2: O
         self.current_player = 1
         self.history = []  # Lưu (row, col)
+        
+        # Zobrist Hashing
+        self.zobrist_table = [[[random.getrandbits(64) for _ in range(3)]
+                               for _ in range(size)] for _ in range(size)]
+        self.zobrist_side = random.getrandbits(64)
+        self.current_hash = 0
 
     def is_valid(self, row, col) -> bool:
         """Kiểm tra nước đi có nằm trong biên và ô đó có trống không."""
         return 0 <= row < self.size and 0 <= col < self.size and self.grid[row, col] == 0
+
+    def get_hash(self):
+        return self.current_hash
 
     def make_move(self, row, col) -> bool:
         """Thực hiện nước đi, trả về False nếu không hợp lệ."""
         if not self.is_valid(row, col):
             return False
         
+        self.current_hash ^= self.zobrist_table[row][col][0] # XOR out empty
         self.grid[row, col] = self.current_player
+        self.current_hash ^= self.zobrist_table[row][col][self.current_player] # XOR in player
+        self.current_hash ^= self.zobrist_side # Flip turn hash
+
         self.history.append((row, col))
         self.current_player = 3 - self.current_player  # Chuyển 1 -> 2 hoặc 2 -> 1
         return True
@@ -33,7 +47,11 @@ class Board:
             return False
         
         row, col = self.history.pop()
+        self.current_hash ^= self.zobrist_table[row][col][self.grid[row, col]] # XOR out player
         self.grid[row, col] = 0
+        self.current_hash ^= self.zobrist_table[row][col][0] # XOR in empty
+        self.current_hash ^= self.zobrist_side # Flip turn hash
+
         self.current_player = 3 - self.current_player
         return True
 
@@ -89,7 +107,25 @@ class Board:
 
         candidate_mask &= (self.grid == 0)
         rows, cols = np.where(candidate_mask)
-        return list(zip(rows.tolist(), cols.tolist()))
+        candidates = list(zip(rows.tolist(), cols.tolist()))
+        opponent = 3 - self.current_player
+
+        def move_priority(pos):
+            r, c = pos
+            # Thử nước thắng
+            self.grid[r, c] = self.current_player
+            if self._check_at(r, c):
+                self.grid[r, c] = 0
+                return 3
+            # Thử nước chặn đối thủ
+            self.grid[r, c] = opponent
+            if self._check_at(r, c):
+                self.grid[r, c] = 0
+                return 2
+            self.grid[r, c] = 0
+            return 0
+
+        return sorted(candidates, key=move_priority, reverse=True)
 
     def copy(self):
         """Tạo một bản sao sâu của bàn cờ."""
@@ -97,6 +133,9 @@ class Board:
         new_board.grid = np.copy(self.grid)
         new_board.current_player = self.current_player
         new_board.history = self.history.copy()
+        new_board.zobrist_table = self.zobrist_table
+        new_board.zobrist_side = self.zobrist_side
+        new_board.current_hash = self.current_hash
         return new_board
 
     def display(self):
