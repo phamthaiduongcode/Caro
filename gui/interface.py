@@ -31,7 +31,6 @@ def load_img(name, size=None, alpha=True):
         img = pygame.transform.smoothscale(img, size)
     return img
 
-
 def draw_text_centered(surface, text, font, color, center, shadow=True):
     """Vẽ text căn giữa, tuỳ chọn bóng đổ."""
     if shadow:
