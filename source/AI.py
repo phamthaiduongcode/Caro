@@ -7,7 +7,7 @@ class SearchTimeout(Exception):
     pass
 
 class CaroAI:
-    def __init__(self, player_id, depth=3, defense_multiplier=1.2):
+    def __init__(self, player_id, depth=3, defense_multiplier=2):
         self.player_id = player_id           # 1 (X) hoặc 2 (O)
         self.opp_id = 3 - player_id          # Đối thủ
         self.depth = depth
@@ -234,20 +234,21 @@ class CaroAI:
                             and grid[next_r, next_c] == 0:
                         open_ends += 1
 
+                    
                     # ── Gán điểm theo pattern ──
                     if p_count == 3:
                         if open_ends == 2:
-                            score += 100_000   # _OOO_  unstoppable
+                            score += 	19680     # Thế _OOO_
                         elif open_ends == 1:
-                            score += 10_000    # OOO_   strong threat
+                            score += 23437    # Thế OOO_
                     elif p_count == 2:
                         if open_ends == 2:
-                            score += 1_000     # _OO_
+                            score += 750       # Thế _OO_
                         elif open_ends == 1:
-                            score += 100       # OO_
+                            score += 19        # Thế OO_
                     elif p_count == 1:
                         if open_ends == 2:
-                            score += 10
+                            score += 1         # Thế _O_
                         else:
                             score += 1
 
