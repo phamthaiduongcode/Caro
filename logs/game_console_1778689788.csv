@@ -1,0 +1,5 @@
+Turn,Algorithm,Depth,Nodes_Visited,Time_Seconds,Score,Move
+1,Human,-,-,-,-,"(1, 1)"
+2,alpha_beta,2,333,0.3425,-1175.5,"(3, 3)"
+3,Human,-,-,-,-,"(1, 2)"
+4,alpha_beta,2,1093,1.1275,-1167.5,"(1, 4)"
