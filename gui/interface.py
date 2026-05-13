@@ -3,7 +3,7 @@ import os
 import sys
 import threading
 
-# ─── Import source logic ──────────────────────────────────────────────────────
+# ─── Import source logic ──
 # Thêm thư mục gốc vào path để import source/ và gui/
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -11,8 +11,8 @@ from source.board import Board        # Bước 4: dùng Board thay list 2D
 from source.AI import CaroAI          # Bước 3: kết nối AI
 from gui.button import Button, ImageButton  # Tái sử dụng button.py
 
-# ─── Constants ────────────────────────────────────────────────────────────────
-SCREEN_W, SCREEN_H = 1000, 700
+# ─── Constants ─
+SCREEN_W, SCREEN_H = 1000, 800
 BOARD_SIZE  = 15          # 15×15 – đồng nhất với GUI
 WIN_COND    = 5           # Cờ Caro thắng 5 quân liên tiếp
 FPS         = 60
@@ -31,10 +31,9 @@ PLAYER_O = 2
 
 # AI config
 AI_DEPTH      = 3
-AI_TIME_LIMIT = 5.0   # giây
+AI_TIME_LIMIT = 1.0   # giây
 
-
-# ─── Tiện ích ─────────────────────────────────────────────────────────────────
+# ─── Tiện ích ──
 
 def load_img(name, size=None, alpha=True):
     """Tải ảnh từ thư mục assets, tuỳ chọn scale."""
@@ -54,7 +53,7 @@ def draw_text_centered(surface, text, font, color, center, shadow=True):
     surface.blit(t, t.get_rect(center=center))
 
 
-# ─── SettingMenu ──────────────────────────────────────────────────────────────
+# ─── SettingMenu ──────────
 
 class SettingMenu:
     """
@@ -87,7 +86,7 @@ class SettingMenu:
         self.panel_rect = pygame.Rect(0, 0, panel_w, panel_h)
         self.panel_rect.center = (cx, screen_h // 2)
 
-        self._title_font = pygame.font.SysFont("segoeuibold", 32, bold=True)
+        self._title_font = pygame.font.SysFont("Times New Roman", 32, bold=True)
 
     def toggle(self):  self.visible = not self.visible
     def open(self):    self.visible = True
@@ -138,7 +137,7 @@ class SettingMenu:
         self.btn_surrender.draw(surface)
 
 
-# ─── WinScreen ───────────────────────────────────────────────────────────────
+# ─── WinScreen 
 
 class WinScreen:
     """
@@ -225,7 +224,7 @@ class WinScreen:
         self.btn_new_game.draw(surface)
 
 
-# ─── GameScreen ───────────────────────────────────────────────────────────────
+# ─── GameScreen 
 
 class GameScreen:
     """
@@ -237,7 +236,7 @@ class GameScreen:
     """
 
     CELL   = 40
-    OFFSET = (40, 50)
+    OFFSET = (40, 70)
 
     def __init__(self, screen_w, screen_h, mode):
         """
@@ -247,10 +246,10 @@ class GameScreen:
         self.sw   = screen_w
         self.sh   = screen_h
 
-        # ── Bước 4: Board từ source ──────────────────────────────────────────
+        # ── Bước 4: Board từ source 
         self.board_obj = Board(size=BOARD_SIZE, win_condition=WIN_COND)
 
-        # ── Bước 3: AI ───────────────────────────────────────────────────────
+        # ── Bước 3: AI ───
         # AI luôn đóng vai O (player_id=2), người chơi là X (player_id=1)
         if self.mode == "Ai":
             self.ai         = CaroAI(player_id=PLAYER_O, depth=AI_DEPTH)
@@ -264,13 +263,23 @@ class GameScreen:
         self.winner    = None
         self.game_over = False
 
-        # ── Assets ──────────────────────────────────────────────────────────
+        # ── Assets ──────
         board_px        = BOARD_SIZE * self.CELL
         self.board_img  = load_img("board.png",  (board_px, board_px))
         self.token_x    = load_img("token_x.png", (self.CELL - 4, self.CELL - 4))
         self.token_o    = load_img("token_o.png", (self.CELL - 4, self.CELL - 4))
         self.turn_x_img = load_img("turn_X.png",  (220, 55))
         self.turn_o_img = load_img("turn_o.png",  (220, 55))
+
+        # ── Scoreboard assets 
+        self.img_score_raw = pygame.image.load(
+            os.path.join(ASSETS, "score.png")).convert_alpha()   # tiêu đề bảng điểm
+        self.img_human = load_img("human.png",  (72, 72))    # avatar người
+        self.img_robot = load_img("robot.png",  (72, 72))    # avatar AI/người 2
+
+        self.score      = {PLAYER_X: 0, PLAYER_O: 0}
+        self._font_score = pygame.font.SysFont("Times New Roman", 36, bold=True)
+        self._font_slabel = pygame.font.SysFont("Times New Roman", 14, bold=True)
 
         # Panel bên phải
         btn_cx = self.OFFSET[0] + board_px + 90
@@ -281,7 +290,7 @@ class GameScreen:
         self._font_mode     = pygame.font.SysFont("Times New Roman", 18)
         self._font_thinking = pygame.font.SysFont("Times New Roman", 16, bold=True)
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # ── Helpers 
 
     @property
     def current(self):
@@ -306,8 +315,13 @@ class GameScreen:
             self.ai_result   = None
         self.setting.close()
         self.win_screen.hide()
+
+    def _add_score(self, winner):
+        """Cộng điểm cho người thắng."""
+        if winner in self.score:
+            self.score[winner] += 1
         
-    # ── Bước 3: AI thread ────────────────────────────────────────────────────
+    # ── Bước 3: AI thread 
 
     def _run_ai(self, board_copy):
         """Chạy trên thread riêng để không block render."""
@@ -348,11 +362,12 @@ class GameScreen:
         if result in (PLAYER_X, PLAYER_O):
             self.winner    = result
             self.game_over = True
+            self._add_score(result)
             self.win_screen.show(result)
         elif result == -1:   # Hòa
             self.game_over = True
 
-    # ── Event / logic ─────────────────────────────────────────────────────────
+    # ── Event / logic ─────
 
     def _place_move(self, row, col):
         """
@@ -366,6 +381,7 @@ class GameScreen:
         if result in (PLAYER_X, PLAYER_O):
             self.winner    = result
             self.game_over = True
+            self._add_score(result)
             self.win_screen.show(result)
         elif result == -1:
             self.game_over = True   # Hòa
@@ -448,7 +464,7 @@ class GameScreen:
 
         return None
 
-    # ── Update / Draw ─────────────────────────────────────────────────────────
+    # ── Update / Draw ─────
 
     def update(self, mouse_pos, mouse_buttons):
         # Bước 3: kiểm tra kết quả AI mỗi frame
@@ -460,6 +476,45 @@ class GameScreen:
             self.btn_setting.update(mouse_pos, mouse_buttons)
             self.btn_undo.update(mouse_pos, mouse_buttons)
             self.setting.update(mouse_pos, mouse_buttons)
+    
+    def _draw_scoreboard(self, surface, panel_x, panel_w):
+        cx       = panel_x + panel_w // 2
+        left_cx  = panel_x + panel_w // 4
+        right_cx = panel_x + 3 * panel_w // 4
+
+        # ── score.png phóng to làm khung nền ───────────────────────────
+        frame_w = panel_w - 16
+        frame_h = 230
+        frame_x = panel_x + 8
+        frame_y = 180
+
+        scaled_score = pygame.transform.smoothscale(
+            self.img_score_raw, (frame_w, frame_h))
+        surface.blit(scaled_score, (frame_x, frame_y))
+
+        # ── Avatar đè lên bên trong khung ──────────────────────────────
+        right_img = self.img_robot if self.mode == "Ai" else self.img_human
+        av_top    = frame_y + 30   # chừa khoảng trên cho tiêu đề của ảnh score
+
+        hr = self.img_human.get_rect(centerx=left_cx,  top=av_top)
+        rr = right_img.get_rect(     centerx=right_cx, top=av_top)
+        surface.blit(self.img_human, hr)
+        surface.blit(right_img,      rr)
+
+        # ── Số điểm ────────────────────────────────────────────────────
+        num_top = max(hr.bottom, rr.bottom) + 6
+        s1 = self._font_score.render(str(self.score[PLAYER_X]), True, (0, 0, 0))
+        s2 = self._font_score.render(str(self.score[PLAYER_O]), True, (0, 0, 0))
+        surface.blit(s1, s1.get_rect(centerx=left_cx,  top=num_top))
+        surface.blit(s2, s2.get_rect(centerx=right_cx, top=num_top))
+
+        # ── Nhãn nhỏ ───────────────────────────────────────────────────
+        lbl1 = self._font_slabel.render("Người 1", True, (60, 30, 10))
+        lbl2 = self._font_slabel.render(
+            "Máy" if self.mode == "Ai" else "Người 2", True, (60, 30, 10))
+        lbl_top = num_top + s1.get_height() + 2
+        surface.blit(lbl1, lbl1.get_rect(centerx=left_cx,  top=lbl_top))
+        surface.blit(lbl2, lbl2.get_rect(centerx=right_cx, top=lbl_top))
 
     def draw(self, surface):
         surface.fill((210, 180, 130))
@@ -474,8 +529,11 @@ class GameScreen:
                 p = int(self.board_obj.grid[r, c])
                 if p in (PLAYER_X, PLAYER_O):
                     img = self.token_x if p == PLAYER_X else self.token_o
-                    surface.blit(img, (ox + c * self.CELL + 2,
-                                       oy + r * self.CELL + 2))
+                    # MỚI – căn giữa token vào đúng tâm ô
+                    token_rect = img.get_rect(
+                        center=(ox + c * self.CELL + self.CELL // 2,
+                            oy + r * self.CELL + self.CELL // 2))
+                    surface.blit(img, token_rect)
 
         # Panel bên phải
         board_px = BOARD_SIZE * self.CELL
@@ -490,21 +548,22 @@ class GameScreen:
         # Nút
         self.btn_setting.draw(surface)
         self.btn_undo.draw(surface)
+        self._draw_scoreboard(surface, panel_x, panel_w)
 
         # Turn indicator
         turn_img  = self.turn_x_img if self.current == PLAYER_X else self.turn_o_img
-        turn_top  = 200
-        turn_rect = turn_img.get_rect(centerx=panel_x + panel_w // 2, top=turn_top)
+        turn_top  = 10
+        turn_rect = turn_img.get_rect(centerx=400, top=turn_top)
         surface.blit(turn_img, turn_rect)
 
         # Bước 3: Hiển thị "AI đang suy nghĩ..." khi AI thread đang chạy
         if self.mode == "Ai" and self.ai_thinking:
             thinking_text = self._font_thinking.render(
-                "Ai đang suy nghĩ...", True, (255, 200, 60))
+                "Ai đang suy nghĩ...", True, (212, 175, 55))
             surface.blit(thinking_text,
                          thinking_text.get_rect(
-                             centerx=panel_x + panel_w // 2,
-                             top=turn_rect.bottom + 10))
+                             centerx=400,
+                             top=turn_rect.bottom + 1))
 
         # Mode label
         mode_text = "VS MÁY" if self.mode == "Ai" else "VS NGƯỜI"
@@ -518,11 +577,13 @@ class GameScreen:
         # Win screen (luôn trên cùng)
         self.win_screen.draw(surface)
 
+    
 
-# ─── MainMenu ─────────────────────────────────────────────────────────────────
+
+# ─── MainMenu ──
 
 class MainMenu:
-    """Màn hình chính: background + 2 nút chọn chế độ chơi."""
+    """Màn hình chính: background + 2 nút chọn chế độ chơi + 1 title ."""
 
     BTN_SIZE = (280, 110)
 
@@ -532,6 +593,7 @@ class MainMenu:
         self.bg = load_img("background.png", (screen_w, screen_h), alpha=False)
 
         cx = screen_w // 2
+
         self.btn_ai    = ImageButton("button_play_with_AI.png",
                                      (cx - 160, screen_h // 2 + 60), self.BTN_SIZE)
         self.btn_human = ImageButton("button_play_with_human.png",
@@ -550,9 +612,11 @@ class MainMenu:
         surface.blit(self.bg, (0, 0))
         self.btn_ai.draw(surface)
         self.btn_human.draw(surface)
+        font = pygame.font.SysFont("Times New Roman", 50)
+        self.title = draw_text_centered(surface , "Game Cờ Caro", font, (108, 128, 128) , (550,200))
 
 
-# ─── CaroGUI ──────────────────────────────────────────────────────────────────
+# ─── CaroGUI ───
 
 class CaroGUI:
     """Lớp điều phối chính: quản lý vòng lặp game và chuyển đổi màn hình."""
