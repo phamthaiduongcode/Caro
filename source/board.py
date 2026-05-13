@@ -5,7 +5,7 @@ class Board:
     # Tối ưu: Định nghĩa các hướng là hằng số để dùng chung, tránh khởi tạo lại nhiều lần
     DIRECTIONS = [(0, 1), (1, 0), (1, 1), (1, -1)]  # Ngang, dọc, 2 chéo
 
-    def __init__(self, size=9, win_condition=4):
+    def __init__(self, size=15, win_condition=5):
         if size < 9:
             raise ValueError("Board size must be at least 9x9.")
         self.size = size

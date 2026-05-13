@@ -1,351 +1,611 @@
 import pygame
-import threading
-import sys
 import os
-import time
+import sys
+import threading
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from gui.button import Button
-from source.utils import log_benchmark_step
+# ─── Import source logic ──────────────────────────────────────────────────────
+# Thêm thư mục gốc vào path để import source/ và gui/
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+from source.board import Board        # Bước 4: dùng Board thay list 2D
+from source.AI import CaroAI          # Bước 3: kết nối AI
+from gui.button import Button, ImageButton  # Tái sử dụng button.py
 
-# ──────────────────────────────────────────
+# ─── Constants ────────────────────────────────────────────────────────────────
+SCREEN_W, SCREEN_H = 1000, 700
+BOARD_SIZE  = 15          # 15×15 – đồng nhất với GUI
+WIN_COND    = 5           # Cờ Caro thắng 5 quân liên tiếp
+FPS         = 60
+ASSETS      = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
+
 # Màu sắc
-# ──────────────────────────────────────────
-BG_COLOR      = (28, 28, 35)
-BOARD_BG      = (45, 45, 55)
-GRID_COLOR    = (90, 90, 110)
-X_COLOR       = (220, 80,  80)
-O_COLOR       = (70, 160, 220)
-LAST_RING     = (255, 220,  60)
-PANEL_BG      = (38, 38, 50)
-TEXT_COLOR    = (225, 225, 225)
-DIM_COLOR     = (130, 130, 150)
+COLOR_OVERLAY = (0, 0, 0, 160)
 
-# ──────────────────────────────────────────
-# Layout
-# ──────────────────────────────────────────
-CELL        = 55          # pixels per cell
-BOARD_N     = 9           # số ô mỗi chiều
-BOARD_PX    = CELL * BOARD_N   # 495
-BX          = 25          # board left margin
-BY          = 30          # board top margin
-PX          = BX + BOARD_PX + 18   # panel left edge  (= 538)
-PW          = 244         # panel width
-WIN_W       = PX + PW + 8         # ≈ 790 → pad to 800
-WIN_H       = BY + BOARD_PX + BY  # = 555 → pad to 580
+# Trạng thái màn hình
+STATE_MAIN_MENU = "main_menu"
+STATE_GAME      = "game"
 
-# Custom pygame event khi AI hoàn thành
-AI_DONE = pygame.USEREVENT + 1
+# Người chơi – khớp với source/board.py (1=X, 2=O)
+PLAYER_X = 1
+PLAYER_O = 2
+
+# AI config
+AI_DEPTH      = 3
+AI_TIME_LIMIT = 5.0   # giây
 
 
-class CaroGUI:
-    def __init__(self, board, ai):
-        pygame.init()
-        self.board = board
-        self.ai    = ai
+# ─── Tiện ích ─────────────────────────────────────────────────────────────────
 
-        self.screen = pygame.display.set_mode((WIN_W, WIN_H))
-        pygame.display.set_caption("Caro AI")
-        self.clock = pygame.time.Clock()
+def load_img(name, size=None, alpha=True):
+    """Tải ảnh từ thư mục assets, tuỳ chọn scale."""
+    path = os.path.join(ASSETS, name)
+    img  = (pygame.image.load(path).convert_alpha()
+            if alpha else pygame.image.load(path).convert())
+    if size:
+        img = pygame.transform.smoothscale(img, size)
+    return img
+
+def draw_text_centered(surface, text, font, color, center, shadow=True):
+    """Vẽ text căn giữa, tuỳ chọn bóng đổ."""
+    if shadow:
+        s = font.render(text, True, (0, 0, 0))
+        surface.blit(s, s.get_rect(center=(center[0] + 2, center[1] + 2)))
+    t = font.render(text, True, color)
+    surface.blit(t, t.get_rect(center=center))
+
+
+# ─── SettingMenu ──────────────────────────────────────────────────────────────
+
+class SettingMenu:
+    """
+    Overlay menu cài đặt hiện ra khi nhấn nút Setting.
+    Chứa: Restart | New Game | Đầu Hàng.
+    """
+
+    BTN_SIZE    = (320, 85)
+    BTN_SPACING = 20
+
+    def __init__(self, screen_w, screen_h):
+        self.visible = False
+        cx = screen_w // 2
+
+        total_h = (self.BTN_SIZE[1] + self.BTN_SPACING) * 3 - self.BTN_SPACING
+        start_y = screen_h // 2 - total_h // 2 + 30
+
+        y1 = start_y
+        y2 = y1 + self.BTN_SIZE[1] + self.BTN_SPACING
+        y3 = y2 + self.BTN_SIZE[1] + self.BTN_SPACING
+
+        self.btn_restart   = ImageButton("button_restart.png",  (cx, y1), self.BTN_SIZE)
+        self.btn_new_game  = ImageButton("button_new_game.png", (cx, y2), self.BTN_SIZE)
+        self.btn_surrender = ImageButton( "surrender.png",(cx, y3), self.BTN_SIZE)
+
+        # Panel nền
+        padding = 40
+        panel_w = self.BTN_SIZE[0] + padding * 2
+        panel_h = total_h + padding * 2 + 50
+        self.panel_rect = pygame.Rect(0, 0, panel_w, panel_h)
+        self.panel_rect.center = (cx, screen_h // 2)
+
+        self._title_font = pygame.font.SysFont("segoeuibold", 32, bold=True)
+
+    def toggle(self):  self.visible = not self.visible
+    def open(self):    self.visible = True
+    def close(self):   self.visible = False
+
+    def handle_event(self, event):
+        """Trả về: 'restart' | 'new_game' | 'surrender' | 'close' | None"""
+        if not self.visible:
+            return None
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if not self.panel_rect.collidepoint(event.pos):
+                return "close"
+        if self.btn_restart.is_clicked(event):   return "restart"
+        if self.btn_new_game.is_clicked(event):  return "new_game"
+        if self.btn_surrender.is_clicked(event): return "surrender"
+        return None
+
+    def update(self, mouse_pos, mouse_buttons):
+        if not self.visible:
+            return
+        self.btn_restart.update(mouse_pos, mouse_buttons)
+        self.btn_new_game.update(mouse_pos, mouse_buttons)
+        self.btn_surrender.update(mouse_pos, mouse_buttons)
+
+    def draw(self, surface):
+        if not self.visible:
+            return
+
+        # Màn mờ
+        overlay = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        overlay.fill(COLOR_OVERLAY)
+        surface.blit(overlay, (0, 0))
+
+        # Panel gỗ
+        ps = pygame.Surface(self.panel_rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(ps, (60, 40, 20, 230), ps.get_rect(), border_radius=20)
+        pygame.draw.rect(ps, (120, 80, 40, 180), ps.get_rect(),
+                         width=3, border_radius=20)
+        surface.blit(ps, self.panel_rect.topleft)
+
+        # Tiêu đề
+        title = self._title_font.render("CÀI ĐẶT", True, (255, 220, 120))
+        surface.blit(title, title.get_rect(
+            centerx=self.panel_rect.centerx, top=self.panel_rect.top + 14))
+
+        self.btn_restart.draw(surface)
+        self.btn_new_game.draw(surface)
+        self.btn_surrender.draw(surface)
+
+
+# ─── WinScreen ───────────────────────────────────────────────────────────────
+
+class WinScreen:
+    """
+    Overlay thắng cuộc: hiện tên người thắng + 2 nút
+      - CHƠI LẠI  (restart, giữ điểm)
+      - BẮT ĐẦU MỚI (về màn chính, reset điểm)
+    """
+
+    BTN_W, BTN_H = 280, 80
+    SPACING      = 18
+
+    def __init__(self, screen_w, screen_h):
+        self.sw      = screen_w
+        self.sh      = screen_h
+        self.visible = False
+        self.winner  = None   # PLAYER_1 hoặc PLAYER_2
+
+        cx   = screen_w // 2
+        box_h = 260
+        box_y = screen_h // 2 - box_h // 2
+
+        btn_y1 = box_y + 140
+        btn_y2 = btn_y1 + self.BTN_H + self.SPACING
+
+        self.btn_restart  = ImageButton("button_restart.png",
+                                        (cx, btn_y1), (self.BTN_W, self.BTN_H))
+        self.btn_new_game = ImageButton("button_new_game.png",
+                                        (cx, btn_y2), (self.BTN_W, self.BTN_H))
+
+        total_h = 140 + self.BTN_H * 2 + self.SPACING + 20
+        self.box = pygame.Rect(0, 0, 440, total_h)
+        self.box.centerx = cx
+        self.box.top     = box_y
+
+        self._font_title = pygame.font.SysFont("Times New Roman", 38, bold=True)
+        self._font_sub   = pygame.font.SysFont("Times New Roman", 26, bold=True)
+
+    def show(self, winner):
+        self.winner  = winner
+        self.visible = True
+
+    def hide(self):
+        self.visible = False
+
+    def handle_event(self, event):
+        """Trả về: 'restart' | 'new_game' | None"""
+        if not self.visible:
+            return None
+        if self.btn_restart.is_clicked(event):  return "restart"
+        if self.btn_new_game.is_clicked(event): return "new_game"
+        return None
+
+    def update(self, mouse_pos, mouse_buttons):
+        if not self.visible:
+            return
+        self.btn_restart.update(mouse_pos, mouse_buttons)
+        self.btn_new_game.update(mouse_pos, mouse_buttons)
+
+    def draw(self, surface):
+        if not self.visible:
+            return
+
+        overlay = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 140))
+        surface.blit(overlay, (0, 0))
+
+        pygame.draw.rect(surface, (55, 35, 10),   self.box.inflate(10, 10), border_radius=24)
+        pygame.draw.rect(surface, (200, 155, 70),  self.box,                border_radius=22)
+        pygame.draw.rect(surface, (240, 200, 100), self.box, width=3,       border_radius=22)
+
+        hl = pygame.Surface((self.box.width, 50), pygame.SRCALPHA)
+        hl.fill((255, 255, 255, 25))
+        surface.blit(hl, self.box.topleft)
+
+        name = "1" if self.winner == PLAYER_X else "2"
+        t1 = self._font_title.render(f" Người chơi {name}", True, (80, 40, 0))
+        t2 = self._font_sub.render("CHIẾN THẮNG!", True, (160, 90, 10))
+        surface.blit(t1, t1.get_rect(centerx=self.box.centerx,
+                                     top=self.box.top + 22))
+        surface.blit(t2, t2.get_rect(centerx=self.box.centerx,
+                                     top=self.box.top + 76))
+
+        self.btn_restart.draw(surface)
+        self.btn_new_game.draw(surface)
+
+
+# ─── GameScreen ───────────────────────────────────────────────────────────────
+
+class GameScreen:
+    """
+    Màn hình ván cờ.
+
+    Bước 4: Dùng source/board.Board thay list 2D thủ công.
+    Bước 3: Tích hợp CaroAI – khi mode='ai', sau lượt người chơi,
+            AI tự tính nước đi trên thread riêng rồi apply.
+    """
+
+    CELL   = 40
+    OFFSET = (40, 50)
+
+    def __init__(self, screen_w, screen_h, mode):
+        """
+        mode : 'Ai' | 'human'
+        """
+        self.mode = mode
+        self.sw   = screen_w
+        self.sh   = screen_h
+
+        # ── Bước 4: Board từ source ──────────────────────────────────────────
+        self.board_obj = Board(size=BOARD_SIZE, win_condition=WIN_COND)
+
+        # ── Bước 3: AI ───────────────────────────────────────────────────────
+        # AI luôn đóng vai O (player_id=2), người chơi là X (player_id=1)
+        if self.mode == "Ai":
+            self.ai         = CaroAI(player_id=PLAYER_O, depth=AI_DEPTH)
+            self.ai_thinking = False   # đang tính toán trên thread?
+            self.ai_result   = None    # (row, col) kết quả từ thread
+
+        self.setting    = SettingMenu(screen_w, screen_h)
+        self.win_screen = WinScreen(screen_w, screen_h)
 
         # Trạng thái game
+        self.winner    = None
+        self.game_over = False
+
+        # ── Assets ──────────────────────────────────────────────────────────
+        board_px        = BOARD_SIZE * self.CELL
+        self.board_img  = load_img("board.png",  (board_px, board_px))
+        self.token_x    = load_img("token_x.png", (self.CELL - 4, self.CELL - 4))
+        self.token_o    = load_img("token_o.png", (self.CELL - 4, self.CELL - 4))
+        self.turn_x_img = load_img("turn_X.png",  (220, 55))
+        self.turn_o_img = load_img("turn_o.png",  (220, 55))
+
+        # Panel bên phải
+        btn_cx = self.OFFSET[0] + board_px + 90
+
+        self.btn_setting = ImageButton("button_setting.png", (btn_cx, 55),  (210, 58))
+        self.btn_undo    = ImageButton("button_undo.png",    (btn_cx, 130), (210, 58))
+
+        self._font_mode     = pygame.font.SysFont("Times New Roman", 18)
+        self._font_thinking = pygame.font.SysFont("Times New Roman", 16, bold=True)
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    @property
+    def current(self):
+        """Người chơi hiện tại lấy thẳng từ Board."""
+        return self.board_obj.current_player
+
+    def _cell_at(self, pos):
+        ox, oy   = self.OFFSET
+        bx, by   = pos[0] - ox, pos[1] - oy
+        board_px = BOARD_SIZE * self.CELL
+        if 0 <= bx < board_px and 0 <= by < board_px:
+            return by // self.CELL, bx // self.CELL
+        return None
+
+    def restart(self):
+        """Chơi lại ván mới, giữ điểm."""
+        self.board_obj = Board(size=BOARD_SIZE, win_condition=WIN_COND)
+        self.winner    = None
+        self.game_over = False
+        if self.mode == "Ai":
+            self.ai_thinking = False
+            self.ai_result   = None
+        self.setting.close()
+        self.win_screen.hide()
+        
+    # ── Bước 3: AI thread ────────────────────────────────────────────────────
+
+    def _run_ai(self, board_copy):
+        """Chạy trên thread riêng để không block render."""
+        move, _, _, _ = self.ai.get_move(board_copy,
+                                         mode="alpha_beta",
+                                         time_limit=AI_TIME_LIMIT)
+        self.ai_result = move   # ghi kết quả; main loop sẽ apply
+
+    def _trigger_ai(self):
+        """Khởi động AI thread nếu chưa đang chạy."""
+        if self.ai_thinking or self.game_over:
+            return
+        self.ai_thinking = True
+        self.ai_result   = None
+        # Truyền bản sao Board vào thread để tránh race condition
+        board_copy = self.board_obj.copy()
+        t = threading.Thread(target=self._run_ai, args=(board_copy,), daemon=True)
+        t.start()
+
+    def _apply_ai_move(self):
+        """
+        Gọi mỗi frame trong update() – nếu AI đã trả kết quả thì apply.
+        """
+        if not self.ai_thinking or self.ai_result is None:
+            return
+        move = self.ai_result
         self.ai_thinking = False
-        self.game_over   = False
-        self.winner      = 0          # 1=X thắng, 2=O thắng, -1=hòa
-        self.ai_mode     = "alpha_beta"
-        self.ai_info     = None       # dict chứa thông số nước AI vừa đi
+        self.ai_result   = None
 
-        # Logging
-        self.turn_count = 0
-        self.log_file = f"logs/game_gui_{int(time.time())}.csv"
+        if move is None or self.game_over:
+            return
 
-        # Fonts
-        self.f_title = pygame.font.SysFont("Arial", 20, bold=True)
-        self.f_body  = pygame.font.SysFont("Arial", 16)
-        self.f_small = pygame.font.SysFont("Arial", 13)
-        self.f_big   = pygame.font.SysFont("Arial", 40, bold=True)
+        row, col = move
+        if not self.board_obj.make_move(row, col):
+            return   # nước không hợp lệ (không nên xảy ra)
 
-        # ── Buttons thuật toán ──
-        self.btn_ab = Button(PX,      120, 112, 32, "Alpha-Beta", active=True)
-        self.btn_mm = Button(PX + 118, 120, 112, 32, "Minimax",    active=False)
+        result = self.board_obj.check_win()
+        if result in (PLAYER_X, PLAYER_O):
+            self.winner    = result
+            self.game_over = True
+            self.win_screen.show(result)
+        elif result == -1:   # Hòa
+            self.game_over = True
 
-        # ── Buttons độ sâu (1, 2, 3) ──
-        self.btn_depth = [
-            Button(PX + i * 76, 200, 66, 32, f"Sâu {i+1}", active=(i == 2))
-            for i in range(3)
-        ]
-        self.ai.depth = 3   # mặc định
+    # ── Event / logic ─────────────────────────────────────────────────────────
 
-        # ── Button chơi lại ──
-        self.btn_new = Button(PX, WIN_H - 54, 230, 38, "Chơi lại", active=False)
+    def _place_move(self, row, col):
+        """
+        Đặt quân cho người chơi hiện tại (dùng Board.make_move).
+        Trả về True nếu thành công.
+        """
+        if not self.board_obj.make_move(row, col):
+            return False
 
-    # ──────────────────────────────────────
-    # Vòng lặp chính
-    # ──────────────────────────────────────
+        result = self.board_obj.check_win()
+        if result in (PLAYER_X, PLAYER_O):
+            self.winner    = result
+            self.game_over = True
+            self.win_screen.show(result)
+        elif result == -1:
+            self.game_over = True   # Hòa
+        return True
+
+    def _undo(self):
+        """
+        Undo: chế độ human → lùi 1 nước.
+                chế độ ai   → lùi 2 nước (người + AI) để người chơi được đi lại.
+        """
+        if self.game_over:
+            return
+        steps = 2 if (self.mode == "Ai" and len(self.board_obj.history) >= 2) else 1
+        for _ in range(steps):
+            self.board_obj.undo_move()
+        # Đảm bảo AI không đang nghĩ dở khi undo
+        if self.mode == "Ai":
+            self.ai_thinking = False
+            self.ai_result   = None
+
+    def handle_event(self, event):
+        """
+        Trả về:
+          'new_game'  → Về màn chính (reset điểm)
+          None        → tiếp tục game
+        """
+        # Win screen ưu tiên cao nhất
+        if self.win_screen.visible:
+            action = self.win_screen.handle_event(event)
+            if action == "restart":
+                self.restart()
+                return None
+            if action == "new_game":
+                self.win_screen.hide()
+                return "new_game"
+            return None
+
+        # Setting menu
+        action = self.setting.handle_event(event)
+        if action == "close":
+            self.setting.close();  return None
+        if action == "restart":
+            self.restart();        return None
+        if action == "new_game":
+            self.setting.close();  return "new_game"
+        if action == "surrender":
+            winner = PLAYER_O if self.current == PLAYER_X else PLAYER_X
+            self.winner    = winner
+            self.game_over = True
+            self.setting.close()
+            self.win_screen.show(winner)
+            return None
+
+        # Nút Setting / Undo
+        if not self.game_over:
+            if self.btn_setting.is_clicked(event):
+                self.setting.toggle();  return None
+            if self.btn_undo.is_clicked(event):
+                self._undo();           return None
+
+        # ── Click bàn cờ ──────────────────────────────────────────────────
+        if self.setting.visible or self.game_over:
+            return None
+
+        # Chế độ AI: chỉ nhận click khi đến lượt người (PLAYER_X)
+        # và AI không đang suy nghĩ
+        if self.mode == "Ai":
+            if self.current != PLAYER_X or self.ai_thinking:
+                return None   # bỏ qua click khi AI đang tính
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            cell = self._cell_at(event.pos)
+            if cell:
+                row, col = cell
+                if self.board_obj.grid[row, col] == 0:
+                    placed = self._place_move(row, col)
+                    # Bước 3: sau lượt người → kích hoạt AI
+                    if placed and not self.game_over and self.mode == "Ai":
+                        self._trigger_ai()
+
+        return None
+
+    # ── Update / Draw ─────────────────────────────────────────────────────────
+
+    def update(self, mouse_pos, mouse_buttons):
+        # Bước 3: kiểm tra kết quả AI mỗi frame
+        if self.mode == "Ai" and not self.game_over:
+            self._apply_ai_move()
+
+        self.win_screen.update(mouse_pos, mouse_buttons)
+        if not self.win_screen.visible:
+            self.btn_setting.update(mouse_pos, mouse_buttons)
+            self.btn_undo.update(mouse_pos, mouse_buttons)
+            self.setting.update(mouse_pos, mouse_buttons)
+
+    def draw(self, surface):
+        surface.fill((210, 180, 130))
+
+        # Bàn cờ
+        surface.blit(self.board_img, self.OFFSET)
+
+        # ── Bước 4: đọc quân cờ từ board_obj.grid (numpy array) ──────────
+        ox, oy = self.OFFSET
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                p = int(self.board_obj.grid[r, c])
+                if p in (PLAYER_X, PLAYER_O):
+                    img = self.token_x if p == PLAYER_X else self.token_o
+                    surface.blit(img, (ox + c * self.CELL + 2,
+                                       oy + r * self.CELL + 2))
+
+        # Panel bên phải
+        board_px = BOARD_SIZE * self.CELL
+        panel_x  = self.OFFSET[0] + board_px + 10
+        panel_w  = self.sw - panel_x - 10
+        pygame.draw.rect(surface, (170, 130, 80),
+                         (panel_x, 10, panel_w, self.sh - 20), border_radius=16)
+        pygame.draw.rect(surface, (120, 80, 30),
+                         (panel_x, 10, panel_w, self.sh - 20),
+                         width=3, border_radius=16)
+
+        # Nút
+        self.btn_setting.draw(surface)
+        self.btn_undo.draw(surface)
+
+        # Turn indicator
+        turn_img  = self.turn_x_img if self.current == PLAYER_X else self.turn_o_img
+        turn_top  = 200
+        turn_rect = turn_img.get_rect(centerx=panel_x + panel_w // 2, top=turn_top)
+        surface.blit(turn_img, turn_rect)
+
+        # Bước 3: Hiển thị "AI đang suy nghĩ..." khi AI thread đang chạy
+        if self.mode == "Ai" and self.ai_thinking:
+            thinking_text = self._font_thinking.render(
+                "Ai đang suy nghĩ...", True, (255, 200, 60))
+            surface.blit(thinking_text,
+                         thinking_text.get_rect(
+                             centerx=panel_x + panel_w // 2,
+                             top=turn_rect.bottom + 10))
+
+        # Mode label
+        mode_text = "VS MÁY" if self.mode == "Ai" else "VS NGƯỜI"
+        ms = self._font_mode.render(mode_text, True, (60, 30, 10))
+        surface.blit(ms, (panel_x + 10, self.sh - 36))
+
+        # Setting menu
+        if not self.win_screen.visible:
+            self.setting.draw(surface)
+
+        # Win screen (luôn trên cùng)
+        self.win_screen.draw(surface)
+
+
+# ─── MainMenu ─────────────────────────────────────────────────────────────────
+
+class MainMenu:
+    """Màn hình chính: background + 2 nút chọn chế độ chơi."""
+
+    BTN_SIZE = (280, 110)
+
+    def __init__(self, screen_w, screen_h):
+        self.sw = screen_w
+        self.sh = screen_h
+        self.bg = load_img("background.png", (screen_w, screen_h), alpha=False)
+
+        cx = screen_w // 2
+        self.btn_ai    = ImageButton("button_play_with_AI.png",
+                                     (cx - 160, screen_h // 2 + 60), self.BTN_SIZE)
+        self.btn_human = ImageButton("button_play_with_human.png",
+                                     (cx + 160, screen_h // 2 + 60), self.BTN_SIZE)
+
+    def handle_event(self, event):
+        if self.btn_ai.is_clicked(event):    return "Ai"
+        if self.btn_human.is_clicked(event): return "human"
+        return None
+
+    def update(self, mouse_pos, mouse_buttons):
+        self.btn_ai.update(mouse_pos, mouse_buttons)
+        self.btn_human.update(mouse_pos, mouse_buttons)
+
+    def draw(self, surface):
+        surface.blit(self.bg, (0, 0))
+        self.btn_ai.draw(surface)
+        self.btn_human.draw(surface)
+
+
+# ─── CaroGUI ──────────────────────────────────────────────────────────────────
+
+class CaroGUI:
+    """Lớp điều phối chính: quản lý vòng lặp game và chuyển đổi màn hình."""
+
+    def __init__(self):
+        pygame.init()
+        self.screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
+        pygame.display.set_caption("Caro – Cờ Năm Trong Một")
+        self.clock  = pygame.time.Clock()
+        self.state  = STATE_MAIN_MENU
+        self.menu   = MainMenu(SCREEN_W, SCREEN_H)
+        self.game   = None
+
+    def _start_game(self, mode):
+        self.game  = GameScreen(SCREEN_W, SCREEN_H, mode)
+        self.state = STATE_GAME
+
+    def _go_main_menu(self):
+        self.game  = None
+        self.state = STATE_MAIN_MENU
+
     def run(self):
-        while True:
-            self.clock.tick(30)
-            
-            # Tự động kích hoạt AI nếu đến lượt và chưa đang nghĩ
-            if not self.game_over and not self.ai_thinking and self.board.current_player == self.ai.player_id:
-                self._start_ai()
+        running = True
+        while running:
+            mouse_pos     = pygame.mouse.get_pos()
+            mouse_buttons = pygame.mouse.get_pressed()
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    pygame.quit()
-                    sys.exit()
-                self._handle(event)
+                    running = False
 
-            self._draw()
+                elif self.state == STATE_MAIN_MENU:
+                    action = self.menu.handle_event(event)
+                    if action in ("Ai", "human"):
+                        self._start_game(action)
+
+                elif self.state == STATE_GAME:
+                    action = self.game.handle_event(event)
+                    if action == "new_game":
+                        self._go_main_menu()
+
+            if self.state == STATE_MAIN_MENU:
+                self.menu.update(mouse_pos, mouse_buttons)
+            elif self.state == STATE_GAME:
+                self.game.update(mouse_pos, mouse_buttons)
+
+            if self.state == STATE_MAIN_MENU:
+                self.menu.draw(self.screen)
+            elif self.state == STATE_GAME:
+                self.game.draw(self.screen)
+
             pygame.display.flip()
+            self.clock.tick(FPS)
 
-    # ──────────────────────────────────────
-    # Xử lý sự kiện
-    # ──────────────────────────────────────
-    def _handle(self, event):
-        # ── Kết quả AI từ thread ──
-        if event.type == AI_DONE:
-            self.ai_thinking = False
-            move = event.dict.get("move")
-            self.ai_info = event.dict
-            if move:
-                self.board.make_move(*move)
-                self.turn_count += 1
-                log_benchmark_step(self.log_file, [
-                    self.turn_count, 
-                    event.dict.get("algo"), 
-                    event.dict.get("depth"), 
-                    event.dict.get("nodes"), 
-                    f"{event.dict.get('duration'):.4f}", 
-                    event.dict.get("score"), 
-                    move
-                ])
-                result = self.board.check_win()
-                if result != 0:
-                    self.game_over = True
-                    self.winner = result
-            return
-
-        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
-            return
-
-        pos = event.pos
-
-        # ── Nút chơi lại ──
-        if self.btn_new.is_clicked(pos):
-            self._reset()
-            return
-
-        # ── Nút thuật toán ──
-        if self.btn_ab.is_clicked(pos):
-            self.ai_mode = "alpha_beta"
-            self.btn_ab.active, self.btn_mm.active = True, False
-            return
-        if self.btn_mm.is_clicked(pos):
-            self.ai_mode = "minimax"
-            self.btn_ab.active, self.btn_mm.active = False, True
-            return
-
-        # ── Nút độ sâu ──
-        for i, btn in enumerate(self.btn_depth):
-            if btn.is_clicked(pos):
-                for b in self.btn_depth:
-                    b.active = False
-                btn.active = True
-                self.ai.depth = i + 1
-                return
-
-        # ── Click lên bàn cờ (lượt người) ──
-        if self.game_over or self.ai_thinking:
-            return
-        human_id = 3 - self.ai.player_id
-        if self.board.current_player != human_id:
-            return
-
-        col = (pos[0] - BX) // CELL
-        row = (pos[1] - BY) // CELL
-        if not (0 <= row < BOARD_N and 0 <= col < BOARD_N):
-            return
-
-        if self.board.make_move(row, col):
-            self.turn_count += 1
-            log_benchmark_step(self.log_file, [self.turn_count, "Human", "-", "-", "-", "-", (row, col)])
-            result = self.board.check_win()
-            if result != 0:
-                self.game_over = True
-                self.winner = result
-            # AI sẽ tự động được kích hoạt bởi vòng lặp run()
-
-    # ──────────────────────────────────────
-    # Chạy AI trong thread riêng
-    # ──────────────────────────────────────
-    def _start_ai(self):
-        self.ai_thinking = True
-        board_copy = self.board.copy()
-        mode = self.ai_mode
-
-        def task():
-            move, score, nodes, duration = self.ai.get_move(
-                board_copy, mode=mode, time_limit=5.0
-            )
-            pygame.event.post(pygame.event.Event(AI_DONE, {
-                "move": move, "score": score,
-                "nodes": nodes, "duration": duration,
-                "algo": mode, "depth": self.ai.depth,
-            }))
-
-        threading.Thread(target=task, daemon=True).start()
-
-    # ──────────────────────────────────────
-    # Reset ván mới
-    # ──────────────────────────────────────
-    def _reset(self):
-        self.board.__init__(self.board.size, self.board.win_condition)
-        self.game_over   = False
-        self.winner      = 0
-        self.ai_thinking = False
-        self.ai_info     = None
-        self.turn_count  = 0
-        self.log_file    = f"logs/game_gui_{int(time.time())}.csv"
-
-    # ──────────────────────────────────────
-    # Vẽ toàn màn hình
-    # ──────────────────────────────────────
-    def _draw(self):
-        self.screen.fill(BG_COLOR)
-        self._draw_board()
-        self._draw_panel()
-        if self.game_over:
-            self._draw_overlay()
-
-    # ── Bàn cờ ──
-    def _draw_board(self):
-        # Nền bàn cờ
-        pygame.draw.rect(
-            self.screen, BOARD_BG,
-            (BX - 4, BY - 4, BOARD_PX + 8, BOARD_PX + 8),
-            border_radius=6,
-        )
-        # Lưới
-        for i in range(BOARD_N + 1):
-            x = BX + i * CELL
-            y = BY + i * CELL
-            pygame.draw.line(self.screen, GRID_COLOR, (x, BY), (x, BY + BOARD_PX))
-            pygame.draw.line(self.screen, GRID_COLOR, (BX, y), (BX + BOARD_PX, y))
-
-        # Quân cờ
-        for r in range(BOARD_N):
-            for c in range(BOARD_N):
-                v = self.board.grid[r, c]
-                if v == 0:
-                    continue
-                cx = BX + c * CELL + CELL // 2
-                cy = BY + r * CELL + CELL // 2
-                color = X_COLOR if v == 1 else O_COLOR
-                pygame.draw.circle(self.screen, color, (cx, cy), CELL // 2 - 5)
-                sym = self.f_body.render("X" if v == 1 else "O", True, (255, 255, 255))
-                self.screen.blit(sym, sym.get_rect(center=(cx, cy)))
-
-        # Highlight nước cuối
-        if self.board.history:
-            lr, lc = self.board.history[-1]
-            cx = BX + lc * CELL + CELL // 2
-            cy = BY + lr * CELL + CELL // 2
-            pygame.draw.circle(self.screen, LAST_RING, (cx, cy), CELL // 2 - 5, 3)
-
-    # ── Panel phải ──
-    def _draw_panel(self):
-        pygame.draw.rect(
-            self.screen, PANEL_BG,
-            (PX - 6, 8, PW + 10, WIN_H - 16),
-            border_radius=8,
-        )
-
-        y = 18
-        human_id = 3 - self.ai.player_id
-        ai_color = X_COLOR if self.ai.player_id == 1 else O_COLOR
-
-        # Tiêu đề lượt
-        if self.game_over:
-            turn_txt, turn_col = "Ván kết thúc", TEXT_COLOR
-        elif self.ai_thinking:
-            turn_txt, turn_col = "AI đang suy nghĩ…", ai_color
-        elif self.board.current_player == human_id:
-            sym = "X" if human_id == 1 else "O"
-            turn_txt, turn_col = f"Lượt của bạn  ({sym})", (X_COLOR if human_id == 1 else O_COLOR)
-        else:
-            sym = "X" if self.ai.player_id == 1 else "O"
-            turn_txt, turn_col = f"Lượt AI  ({sym})", ai_color
-
-        self.screen.blit(self.f_title.render(turn_txt, True, turn_col), (PX, y))
-
-        # ── Số quân ──
-        y = 55
-        x_cnt = sum(1 for r in range(BOARD_N) for c in range(BOARD_N) if self.board.grid[r, c] == 1)
-        o_cnt = sum(1 for r in range(BOARD_N) for c in range(BOARD_N) if self.board.grid[r, c] == 2)
-        self.screen.blit(self.f_small.render(f"X: {x_cnt} quân    O: {o_cnt} quân", True, DIM_COLOR), (PX, y))
-
-        # ── Label thuật toán ──
-        y = 95
-        self.screen.blit(self.f_body.render("Thuật toán:", True, TEXT_COLOR), (PX, y))
-        self.btn_ab.draw(self.screen)
-        self.btn_mm.draw(self.screen)
-
-        # ── Label độ sâu ──
-        y = 173
-        self.screen.blit(self.f_body.render("Độ sâu:", True, TEXT_COLOR), (PX, y))
-        for btn in self.btn_depth:
-            btn.draw(self.screen)
-
-        # ── Thông tin nước AI ──
-        y = 250
-        self.screen.blit(self.f_body.render("Nước AI vừa đi:", True, TEXT_COLOR), (PX, y))
-        y += 24
-        if self.ai_info:
-            rows = [
-                ("Nước đi",  str(self.ai_info.get("move"))),
-                ("Algo",     self.ai_info.get("algo", "")),
-                ("Độ sâu",   str(self.ai_info.get("depth", ""))),
-                ("Nodes",    f"{self.ai_info.get('nodes', 0):,}"),
-                ("Thời gian",f"{self.ai_info.get('duration', 0):.3f} s"),
-                ("Score",    str(self.ai_info.get("score", ""))),
-            ]
-            for label, val in rows:
-                line = f"{label}: {val}"
-                self.screen.blit(self.f_small.render(line, True, (170, 210, 170)), (PX, y))
-                y += 20
-        else:
-            self.screen.blit(
-                self.f_small.render("Chưa có thông tin", True, DIM_COLOR), (PX, y)
-            )
-
-        # ── Hướng dẫn ──
-        y = WIN_H - 100
-        tips = ["Click ô để đi", "U: không có", "'Chơi lại' để reset"]
-        for tip in tips:
-            self.screen.blit(self.f_small.render(tip, True, DIM_COLOR), (PX, y))
-            y += 17
-
-        self.btn_new.draw(self.screen)
-
-    # ── Overlay kết thúc ──
-    def _draw_overlay(self):
-        overlay = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 155))
-        self.screen.blit(overlay, (0, 0))
-
-        if self.winner == 1:
-            msg, col = "Bạn thắng! 🏆", X_COLOR
-        elif self.winner == 2:
-            msg, col = "AI thắng! 💻", O_COLOR
-        else:
-            msg, col = "Hòa! 🤝", TEXT_COLOR
-
-        board_cx = BX + BOARD_PX // 2
-        board_cy = BY + BOARD_PX // 2
-
-        surf = self.f_big.render(msg, True, col)
-        self.screen.blit(surf, surf.get_rect(center=(board_cx, board_cy - 20)))
-
-        sub = self.f_body.render("Nhấn 'Chơi lại' ở bên phải để tiếp tục", True, (200, 200, 200))
-        self.screen.blit(sub, sub.get_rect(center=(board_cx, board_cy + 30)))
+        pygame.quit()
+        sys.exit()
