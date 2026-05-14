@@ -3,7 +3,7 @@ import pygame
 
 # Đường dẫn assets: gui/ -> lên 1 cấp -> assets/
 _ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
-
+from gui.sound_manager import SoundManager
 
 # --- Button -------------------------------------------------------------------
 
@@ -42,10 +42,12 @@ class Button:
             surface.blit(txt, txt.get_rect(center=draw_rect.center))
 
     def is_clicked(self, event):
-        return (event.type == pygame.MOUSEBUTTONUP
-                and event.button == 1
-                and self.rect.collidepoint(event.pos))
-
+        hit = (event.type == pygame.MOUSEBUTTONUP
+               and event.button == 1
+               and self.rect.collidepoint(event.pos))
+        if hit:
+            SoundManager().play("btn_click")  
+        return hit
 
 # --- ImageButton --------------------------------------------------------------
 

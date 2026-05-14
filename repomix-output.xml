@@ -64,6 +64,7 @@ requirements.txt
 source/AI.py
 source/benchmark.py
 source/board.py
+source/trainer.py
 source/utils.py
 </directory_structure>
 
@@ -293,7 +294,482 @@ __marimo__/
 .gemini/
 
 #trash 
-.repomix-output.xml
+repomix-output.xml
+</file>
+
+<file path="source/benchmark.py">
+def run_benchmark():
+    # So sánh thời gian xử lý và số node duyệt của Minimax vs Alpha-Beta
+    pass
+</file>
+
+<file path="source/trainer.py">
+"""
+trainer.py — Genetic Algorithm để tối ưu trọng số heuristic cho CaroAI
+
+Cách chạy:
+    python source/trainer.py                      # GA đầy đủ (mặc định)
+    python source/trainer.py --quick              # Chạy nhanh để test
+    python source/trainer.py --workers 4          # Dùng 4 CPU cores
+
+Kết quả best weights được lưu vào: logs/best_weights.json
+"""
+
+import sys
+import os
+import json
+import random
+import copy
+import time
+import argparse
+import multiprocessing as mp
+from multiprocessing import Pool
+
+# Đảm bảo import được từ source/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from source.board import Board
+from source.AI import CaroAI, DEFAULT_WEIGHTS
+
+
+# ─────────────────────────────────────────────────────────────
+# Cấu hình GA
+# ─────────────────────────────────────────────────────────────
+GA_CONFIG = {
+    # Kích thước quần thể
+    "population_size": 24,
+
+    # Số thế hệ
+    "generations": 60,
+
+    # Số elite giữ nguyên sang thế hệ kế tiếp (không mutation)
+    "elite_k": 4,
+
+    # Số đối thủ ngẫu nhiên mỗi agent đấu với trong 1 generation
+    "opponents_per_agent": 6,
+
+    # Số ván đấu mỗi cặp (nên là số chẵn để cân bằng lượt X/O)
+    "games_per_pair": 2,
+
+    # Depth khi training — depth=2 nhanh hơn ~10x so với depth=3
+    # Sau khi train xong, weights vẫn dùng tốt ở depth=3
+    "train_depth": 2,
+
+    # Xác suất mutation mỗi gene
+    "mutation_rate": 0.20,
+
+    # Biên độ mutation: weight *= uniform(1 - strength, 1 + strength)
+    "mutation_strength": 0.30,
+
+    # Tỷ lệ agent khởi tạo ngẫu nhiên hoàn toàn (tăng diversity)
+    "random_init_ratio": 0.25,
+}
+
+# Các key cần tối ưu (bỏ defense_mult và center_bonus cũng có thể tune)
+PARAM_KEYS = [
+    "open3", "half3", "broken4",
+    "open2", "half2", "broken3",
+    "open1", "defense_mult", "center_bonus",
+]
+
+# Khoảng tìm kiếm hợp lý cho từng tham số
+PARAM_BOUNDS = {
+    "open3":        (20_000,   300_000),
+    "half3":        ( 2_000,    80_000),
+    "broken4":      (20_000,   200_000),
+    "open2":        (   200,    10_000),
+    "half2":        (    20,     2_000),
+    "broken3":      (   500,    20_000),
+    "open1":        (     2,       100),
+    "defense_mult": (  0.80,      1.60),
+    "center_bonus": (     0,       150),
+}
+
+
+# ─────────────────────────────────────────────────────────────
+# Khởi tạo agent
+# ─────────────────────────────────────────────────────────────
+def random_agent():
+    """Agent với trọng số ngẫu nhiên trong khoảng hợp lý."""
+    return {k: random.uniform(*PARAM_BOUNDS[k]) for k in PARAM_KEYS}
+
+
+def baseline_agent():
+    """Agent khởi tạo từ DEFAULT_WEIGHTS (điểm xuất phát tốt)."""
+    return {k: DEFAULT_WEIGHTS[k] for k in PARAM_KEYS}
+
+
+def perturbed_agent(base=None, strength=0.2):
+    """Agent từ baseline có nhiễu nhỏ — tốt hơn random hoàn toàn."""
+    base = base or DEFAULT_WEIGHTS
+    agent = {}
+    for k in PARAM_KEYS:
+        lo, hi = PARAM_BOUNDS[k]
+        v = base[k] * random.uniform(1 - strength, 1 + strength)
+        agent[k] = max(lo, min(hi, v))
+    return agent
+
+
+# ─────────────────────────────────────────────────────────────
+# Genetic operators
+# ─────────────────────────────────────────────────────────────
+def crossover(parent_a, parent_b):
+    """Uniform crossover: mỗi gene chọn ngẫu nhiên từ 1 trong 2 cha mẹ."""
+    return {
+        k: parent_a[k] if random.random() < 0.5 else parent_b[k]
+        for k in PARAM_KEYS
+    }
+
+
+def mutate(agent, rate=0.20, strength=0.30):
+    """Gaussian-like mutation: nhân mỗi gene với hệ số ngẫu nhiên."""
+    w = copy.deepcopy(agent)
+    for k in PARAM_KEYS:
+        if random.random() < rate:
+            lo, hi = PARAM_BOUNDS[k]
+            w[k] *= random.uniform(1 - strength, 1 + strength)
+            w[k]  = max(lo, min(hi, w[k]))
+    return w
+
+
+# ─────────────────────────────────────────────────────────────
+# Thi đấu
+# ─────────────────────────────────────────────────────────────
+def play_one_game(weights_x, weights_o, board_size=9, depth=2):
+    """
+    Cho 2 agent đấu 1 ván.
+    Agent X = weights_x, Agent O = weights_o
+    Trả về: 1 nếu X thắng, 2 nếu O thắng, 0 nếu hòa
+    """
+    board = Board(board_size, win_condition=4)
+    agents = {
+        1: CaroAI(player_id=1, depth=depth, weights=copy.deepcopy(weights_x)),
+        2: CaroAI(player_id=2, depth=depth, weights=copy.deepcopy(weights_o)),
+    }
+    max_moves = board_size * board_size
+
+    for _ in range(max_moves):
+        pid  = board.current_player
+        move, _, _, _ = agents[pid].get_move(board, mode="alpha_beta", time_limit=None)
+        if move is None:
+            return 0
+        board.make_move(*move)
+        result = board.check_win()
+        if result in (1, 2):
+            return result
+        if result == -1:
+            return 0
+
+    return 0  # Hòa do hết bàn
+
+
+def evaluate_pair(args):
+    """
+    Wrapper cho multiprocessing.
+    Đánh 2 ván cân bằng (1 ván đóng vai X, 1 ván đóng vai O).
+    Trả về (wins_a, wins_b, draws).
+    """
+    weights_a, weights_b, depth = args
+    wins_a = wins_b = draws = 0
+
+    # Ván 1: A đánh X
+    r1 = play_one_game(weights_a, weights_b, depth=depth)
+    if r1 == 1:   wins_a += 1
+    elif r1 == 2: wins_b += 1
+    else:          draws  += 1
+
+    # Ván 2: A đánh O
+    r2 = play_one_game(weights_b, weights_a, depth=depth)
+    if r2 == 1:   wins_b += 1
+    elif r2 == 2: wins_a += 1
+    else:          draws  += 1
+
+    return wins_a, wins_b, draws
+
+
+# ─────────────────────────────────────────────────────────────
+# Đánh giá fitness toàn quần thể
+# ─────────────────────────────────────────────────────────────
+def evaluate_population(population, config, n_workers=1):
+    """
+    Mỗi agent đấu với opponents_per_agent đối thủ ngẫu nhiên.
+    Fitness = win_rate ∈ [0, 1]
+    Dùng multiprocessing nếu n_workers > 1.
+    """
+    pop_size     = len(population)
+    opp_k        = min(config["opponents_per_agent"], pop_size - 1)
+    depth        = config["train_depth"]
+
+    # Xây dựng danh sách các trận đấu — mỗi cặp {i, j} chỉ xuất hiện 1 lần.
+    # evaluate_pair đã tự chơi cả 2 chiều (A=X và A=O) nên dedup là đúng.
+    # Nếu để cả (i,j) lẫn (j,i), cặp đó đấu 4 ván thay vì 2 → skew fitness.
+    seen       = set()
+    match_list = []
+    for i in range(pop_size):
+        opponents = random.sample([j for j in range(pop_size) if j != i], k=opp_k)
+        for j in opponents:
+            pair = (min(i, j), max(i, j))   # canonical key để dedup
+            if pair not in seen:
+                seen.add(pair)
+                match_list.append((i, j))   # i = "agent A" trong evaluate_pair
+
+    # Tạo args cho từng trận
+    args_list = [
+        (population[i], population[j], depth)
+        for i, j in match_list
+    ]
+
+    # Chạy các trận đấu
+    if n_workers > 1:
+        with Pool(processes=n_workers) as pool:
+            results = pool.map(evaluate_pair, args_list)
+    else:
+        results = [evaluate_pair(a) for a in args_list]
+
+    # Tổng hợp điểm
+    wins  = [0] * pop_size
+    total = [0] * pop_size
+
+    for (i, j), (wa, wb, _) in zip(match_list, results):
+        wins[i]  += wa
+        wins[j]  += wb
+        total[i] += 2   # mỗi evaluate_pair chơi 2 ván
+        total[j] += 2
+
+    fitness = [
+        wins[i] / total[i] if total[i] > 0 else 0.0
+        for i in range(pop_size)
+    ]
+    return fitness
+
+
+# ─────────────────────────────────────────────────────────────
+# Vòng lặp GA chính
+# ─────────────────────────────────────────────────────────────
+def run_ga(config=None, n_workers=1, save_path="logs/best_weights.json",
+           log_path="logs/training_log.csv"):
+    if config is None:
+        config = GA_CONFIG
+
+    pop_size    = config["population_size"]
+    generations = config["generations"]
+    elite_k     = config["elite_k"]
+    mut_rate    = config["mutation_rate"]
+    mut_str     = config["mutation_strength"]
+    rand_ratio  = config["random_init_ratio"]
+
+    print("=" * 55)
+    print("   CARO AI — GENETIC ALGORITHM TRAINER")
+    print("=" * 55)
+    print(f"  Population : {pop_size}")
+    print(f"  Generations: {generations}")
+    print(f"  Train depth: {config['train_depth']}")
+    print(f"  Opponents  : {config['opponents_per_agent']} / agent")
+    print(f"  CPU workers: {n_workers}")
+    print(f"  Log CSV    : {log_path}")
+    print("=" * 55)
+
+    # ── Khởi tạo quần thể ──
+    n_random   = max(1, int(pop_size * rand_ratio))
+    n_perturb  = max(0, pop_size - n_random - 1)   # -1 cho baseline; guard âm
+    population = (
+        [baseline_agent()]
+        + [perturbed_agent() for _ in range(n_perturb)]
+        + [random_agent()    for _ in range(n_random)]
+    )
+    random.shuffle(population)
+
+    best_ever  = None
+    best_score = -1.0
+    history    = []   # (gen, best_fitness, avg_fitness)
+
+    for gen in range(1, generations + 1):
+        t0      = time.time()
+        fitness = evaluate_population(population, config, n_workers)
+        elapsed = time.time() - t0
+
+        avg_f = sum(fitness) / len(fitness)
+        max_f = max(fitness)
+        best_idx = fitness.index(max_f)
+
+        if max_f > best_score:
+            best_score = max_f
+            best_ever  = copy.deepcopy(population[best_idx])
+            _save_weights(best_ever, best_score, gen, save_path)
+
+        history.append((gen, max_f, avg_f))
+        print(f"Gen {gen:3d}/{generations} | "
+              f"Best: {max_f:.3f}  Avg: {avg_f:.3f}  "
+              f"All-time: {best_score:.3f}  ({elapsed:.1f}s)")
+
+        # ── Ghi log CSV mỗi generation ──
+        # Tính thêm min fitness và diversity (std)
+        min_f = min(fitness)
+        std_f = (sum((x - avg_f)**2 for x in fitness) / len(fitness)) ** 0.5
+        _append_gen_log(log_path, {
+            "generation":     gen,
+            "best_fitness":   round(max_f, 4),
+            "avg_fitness":    round(avg_f, 4),
+            "min_fitness":    round(min_f, 4),
+            "std_fitness":    round(std_f, 4),
+            "alltime_best":   round(best_score, 4),
+            "elapsed_sec":    round(elapsed, 2),
+            # Ghi snapshot weights của best agent để phân tích sau
+            **{f"w_{k}": round(population[best_idx][k], 2) for k in PARAM_KEYS},
+        })
+
+        # ── Selection: giữ elite ──
+        ranked   = sorted(range(pop_size), key=lambda i: -fitness[i])
+        elites   = [copy.deepcopy(population[i]) for i in ranked[:elite_k]]
+
+        # ── Tạo thế hệ mới ──
+        new_pop  = list(elites)
+
+        # Thêm 1 agent random hoàn toàn để duy trì diversity
+        new_pop.append(random_agent())
+
+        while len(new_pop) < pop_size:
+            # Tournament selection (size 3) để chọn cha mẹ
+            p1 = _tournament(population, fitness, k=3)
+            p2 = _tournament(population, fitness, k=3)
+            child = mutate(crossover(p1, p2), mut_rate, mut_str)
+            new_pop.append(child)
+
+        population = new_pop
+
+    print("\n" + "=" * 55)
+    print("  TRAINING HOÀN TẤT")
+    print(f"  Best win-rate: {best_score:.3f}")
+    print("=" * 55)
+    print("\nBest weights:")
+    for k, v in best_ever.items():
+        baseline_v = DEFAULT_WEIGHTS.get(k, "?")
+        arrow = "↑" if v > baseline_v else "↓" if v < baseline_v else "="
+        print(f"  {k:15s}: {v:10.1f}   (baseline: {baseline_v}) {arrow}")
+
+    _save_weights(best_ever, best_score, generations, save_path)
+    print(f"\nĐã lưu vào: {save_path}")
+    return best_ever, history
+
+
+# ─────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────
+def _tournament(population, fitness, k=3):
+    """Chọn ngẫu nhiên k agent, trả về agent có fitness cao nhất."""
+    candidates = random.sample(range(len(population)), k=min(k, len(population)))
+    best       = max(candidates, key=lambda i: fitness[i])
+    return copy.deepcopy(population[best])
+
+
+def _append_gen_log(log_path, row: dict):
+    """Ghi thêm 1 dòng stats vào CSV log của quá trình training."""
+    import csv
+    os.makedirs(os.path.dirname(log_path) if os.path.dirname(log_path) else ".", exist_ok=True)
+    file_exists = os.path.isfile(log_path)
+    with open(log_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def _save_weights(weights, score, gen, path):
+    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+    data = {
+        "weights":    weights,
+        "win_rate":   round(score, 4),
+        "generation": gen,
+        "timestamp":  time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_weights(path="logs/best_weights.json"):
+    """Load weights đã train để dùng trong game."""
+    with open(path) as f:
+        data = json.load(f)
+    print(f"Loaded weights từ gen {data['generation']}, "
+          f"win-rate = {data['win_rate']}")
+    return data["weights"]
+
+
+# ─────────────────────────────────────────────────────────────
+# Verify: so sánh trained vs baseline
+# ─────────────────────────────────────────────────────────────
+def verify_weights(trained_weights, n_games=20, depth=3):
+    """
+    Cho trained agent đấu với baseline tại depth=3.
+    Dùng sau khi train xong để xác nhận kết quả.
+    """
+    print(f"\n=== VERIFY: Trained vs Baseline ({n_games} ván, depth={depth}) ===")
+    wins_trained = wins_base = draws = 0
+
+    for g in range(n_games):
+        if g % 2 == 0:
+            # Trained = X
+            r = play_one_game(trained_weights, DEFAULT_WEIGHTS, depth=depth)
+            if r == 1:    wins_trained += 1
+            elif r == 2:  wins_base    += 1
+            else:          draws       += 1
+        else:
+            # Trained = O
+            r = play_one_game(DEFAULT_WEIGHTS, trained_weights, depth=depth)
+            if r == 2:    wins_trained += 1
+            elif r == 1:  wins_base    += 1
+            else:          draws       += 1
+
+        print(f"  Ván {g+1:2d}: Trained={wins_trained}  Baseline={wins_base}  "
+              f"Draw={draws}", end="\r")
+
+    print(f"\n  Kết quả: Trained {wins_trained}W / {draws}D / {wins_base}L "
+          f"(win-rate = {wins_trained/n_games:.2f})")
+    return wins_trained, draws, wins_base
+
+
+# ─────────────────────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Caro AI — GA Trainer")
+    parser.add_argument("--quick",   action="store_true",
+                        help="Chạy nhanh để test (pop=8, gen=5)")
+    parser.add_argument("--verify",  action="store_true",
+                        help="Chỉ verify weights đã có (không train lại)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Số CPU worker (mặc định 1)")
+    parser.add_argument("--output",  type=str, default="logs/best_weights.json",
+                        help="Đường dẫn lưu kết quả weights")
+    parser.add_argument("--log",     type=str, default="logs/training_log.csv",
+                        help="Đường dẫn lưu CSV log từng generation")
+    args = parser.parse_args()
+
+    if args.verify:
+        weights = load_weights(args.output)
+        verify_weights(weights, n_games=20, depth=3)
+        sys.exit(0)
+
+    config = copy.deepcopy(GA_CONFIG)
+    if args.quick:
+        config.update({
+            "population_size":    8,
+            "generations":        5,
+            "elite_k":            2,
+            "opponents_per_agent": 3,
+            "train_depth":        2,
+        })
+        print("[QUICK MODE] Chạy nhanh để kiểm tra pipeline...")
+
+    # Trên Windows cần guard để multiprocessing hoạt động đúng
+    best_weights, history = run_ga(
+        config    = config,
+        n_workers = args.workers,
+        save_path = args.output,
+        log_path  = args.log,
+    )
+
+    # Verify tự động sau khi train
+    verify_weights(best_weights, n_games=10, depth=3)
 </file>
 
 <file path="play.py">
@@ -308,10 +784,37 @@ if __name__ == "__main__":
     main()
 </file>
 
-<file path="source/benchmark.py">
-def run_benchmark():
-    # So sánh thời gian xử lý và số node duyệt của Minimax vs Alpha-Beta
-    pass
+<file path="README.md">
+# Caro
+Gomoku (Caro) AI Project
+
+## Cấu trúc thư mục
+- `play.py`: Điểm khởi chạy chương trình.
+- `requirements.txt`: Các thư viện cần thiết.
+- `source/`: Chứa logic xử lý trò chơi và AI.
+    - `board.py`: Logic bàn cờ và luật chơi.
+    - `AI.py`: Thuật toán Minimax, Alpha-Beta Pruning.
+    - `utils.py`: Tiện ích lưu log CSV.
+    - `benchmark.py`: So sánh hiệu năng giữa các thuật toán.
+- `gui/`: Giao diện người dùng.
+    - `interface.py`: Xử lý giao diện chính bằng Pygame.
+    - `button.py`: Widget nút bấm.
+    - `analysis.py`: Vẽ biểu đồ kết quả benchmark.
+- `logs/`: Chứa các file log kết quả (tự động tạo).
+- `experiments/`: Chứa hình ảnh kết quả thực nghiệm.
+
+## Hướng dẫn cài đặt
+```bash
+pip install -r requirements.txt
+python play.py
+```
+</file>
+
+<file path="requirements.txt">
+pygame==2.6.1
+numpy==2.3.5
+matplotlib==3.11.1
+pandas==2.3.3
 </file>
 
 <file path="source/utils.py">
@@ -325,6 +828,16 @@ def log_game_result(file_path, data):
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow(['Timestamp', 'Winner', 'Moves', 'Duration'])
+        writer.writerow(data)
+
+def log_benchmark_step(file_path, data):
+    """Ghi log chi tiết từng bước đi cho mục đích benchmark."""
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    file_exists = os.path.isfile(file_path)
+    with open(file_path, mode='a', newline='') as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(['Turn', 'Algorithm', 'Depth', 'Nodes_Visited', 'Time_Seconds', 'Score', 'Move'])
         writer.writerow(data)
 </file>
 
@@ -420,39 +933,6 @@ class ImageButton(Button):
         surface.blit(img, rect.move(0, 3) if self.pressed else rect)
 </file>
 
-<file path="README.md">
-# Caro
-Gomoku (Caro) AI Project
-
-## Cấu trúc thư mục
-- `play.py`: Điểm khởi chạy chương trình.
-- `requirements.txt`: Các thư viện cần thiết.
-- `source/`: Chứa logic xử lý trò chơi và AI.
-    - `board.py`: Logic bàn cờ và luật chơi.
-    - `AI.py`: Thuật toán Minimax, Alpha-Beta Pruning.
-    - `utils.py`: Tiện ích lưu log CSV.
-    - `benchmark.py`: So sánh hiệu năng giữa các thuật toán.
-- `gui/`: Giao diện người dùng.
-    - `interface.py`: Xử lý giao diện chính bằng Pygame.
-    - `button.py`: Widget nút bấm.
-    - `analysis.py`: Vẽ biểu đồ kết quả benchmark.
-- `logs/`: Chứa các file log kết quả (tự động tạo).
-- `experiments/`: Chứa hình ảnh kết quả thực nghiệm.
-
-## Hướng dẫn cài đặt
-```bash
-pip install -r requirements.txt
-python play.py
-```
-</file>
-
-<file path="requirements.txt">
-pygame==2.6.1
-numpy==2.3.5
-matplotlib==3.11.1
-pandas==2.3.3
-</file>
-
 <file path="gui/interface.py">
 import pygame
 import os
@@ -487,8 +967,7 @@ PLAYER_O = 2
 
 # AI config
 AI_DEPTH      = 3
-AI_TIME_LIMIT = 5.0   # giây
-
+AI_TIME_LIMIT = 1.0   # giây
 
 # ─── Tiện ích ─────────────────────────────────────────────────────────────────
 
@@ -532,6 +1011,8 @@ class SettingMenu:
         y2 = y1 + self.BTN_SIZE[1] + self.BTN_SPACING
         y3 = y2 + self.BTN_SIZE[1] + self.BTN_SPACING
 
+        font = pygame.font.SysFont("Times New Roman", 50)
+        self.title = draw_text_centered(screen_h , "Game Cờ Caro", font, (128, 128, 128) , (400,300))
         self.btn_restart   = ImageButton("button_restart.png",  (cx, y1), self.BTN_SIZE)
         self.btn_new_game  = ImageButton("button_new_game.png", (cx, y2), self.BTN_SIZE)
         self.btn_surrender = ImageButton( "surrender.png",(cx, y3), self.BTN_SIZE)
@@ -543,7 +1024,7 @@ class SettingMenu:
         self.panel_rect = pygame.Rect(0, 0, panel_w, panel_h)
         self.panel_rect.center = (cx, screen_h // 2)
 
-        self._title_font = pygame.font.SysFont("segoeuibold", 32, bold=True)
+        self._title_font = pygame.font.SysFont("Times New Roman", 32, bold=True)
 
     def toggle(self):  self.visible = not self.visible
     def open(self):    self.visible = True
@@ -1069,122 +1550,158 @@ class CaroGUI:
 
 <file path="source/AI.py">
 import math
-import numpy as np
 import time
 
 class SearchTimeout(Exception):
     """Ngoại lệ tùy chỉnh để dừng tìm kiếm khi hết thời gian."""
     pass
 
+
+# ─────────────────────────────────────────────────────────────
+# Trọng số mặc định (baseline đã được căn chỉnh tay)
+# Đây là điểm khởi đầu cho GA training.
+# ─────────────────────────────────────────────────────────────
+DEFAULT_WEIGHTS = {
+    # Tấn công (AI)
+    "open3":        100_000,   # _XXX_  → gần thắng chắc, không có luật chặn 2 đầu
+    "half3":         10_000,   # XXX_   → mối đe dọa mạnh
+    "broken4":       80_000,   # XX_X hoặc X_XX → chỉ cần 1 nước là thắng
+    "open2":          1_000,   # _XX_
+    "half2":            100,   # XX_ hoặc _XX (1 đầu bị chặn)
+    "broken3":        3_000,   # X_XX_ hoặc _X_X_ (3 quân trong 5 ô)
+    "open1":             10,   # _X_
+
+    # Hệ số phòng thủ: nhân vào điểm của đối thủ
+    # > 1.0: thiên về phòng thủ; < 1.0: thiên về tấn công
+    # Không có luật chặn 2 đầu → open3 của địch rất nguy hiểm → nên > 1.0
+    "defense_mult":    1.15,
+
+    # Bonus vị trí: cộng thêm cho quân gần tâm
+    "center_bonus":      40,   # điểm tối đa tại tâm, giảm dần theo khoảng cách
+}
+
+
 class CaroAI:
-    def __init__(self, player_id, depth=3, defense_multiplier=1.2):
-        self.player_id = player_id           # 1 (X) hoặc 2 (O)
-        self.opp_id = 3 - player_id          # Đối thủ
-        self.depth = depth
-        self.defense_multiplier = defense_multiplier
-        self.nodes_visited = 0
-        self.center = 0
-        self.start_time = 0
-        self.time_limit = 0
+    def __init__(self, player_id, depth=3, weights=None):
+        """
+        Args:
+            player_id: 1 (X) hoặc 2 (O)
+            depth:     độ sâu tìm kiếm tối đa
+            weights:   dict trọng số (dùng DEFAULT_WEIGHTS nếu None)
+        """
+        self.player_id = player_id
+        self.opp_id    = 3 - player_id
+        self.depth     = depth
+        self.weights   = weights if weights is not None else dict(DEFAULT_WEIGHTS)
+
+        self.nodes_visited     = 0
+        self.center            = 0
+        self.start_time        = 0
+        self.time_limit        = 0
         self.transposition_table = {}
 
+    # ──────────────────────────────────────────────────────────
+    # Giao diện chính
+    # ──────────────────────────────────────────────────────────
     def get_move(self, board, mode="alpha_beta", time_limit=8.0):
         """
-        Hàm giao tiếp chính với GUI hoặc Benchmark, hỗ trợ Iterative Deepening.
         Trả về: (best_move, best_score, nodes_visited, time_taken)
+        time_limit=None → bỏ qua iterative deepening, chạy thẳng depth.
         """
-        self.nodes_visited = 0
-        self.start_time = time.time()
-        self.time_limit = time_limit
-        self.transposition_table = {} # Clear TT at the start of each search
-        
-        # Cập nhật ID người chơi theo trạng thái hiện tại của bàn cờ
+        self.nodes_visited       = 0
+        self.start_time          = time.time()
+        self.time_limit          = time_limit
+        self.transposition_table = {}
+
         self.player_id = board.current_player
-        self.opp_id = 3 - self.player_id
-        # Bug 2 Fix: Sử dụng chia lấy nguyên để tránh sai số float và tối ưu hiệu suất
-        self.center = board.size // 2
-        
+        self.opp_id    = 3 - self.player_id
+        self.center    = board.size // 2
+
         legal_moves = board.get_legal_moves()
         if not legal_moves:
             return None, 0, 0, 0
 
-        # Move Ordering: Ưu tiên duyệt các nước đi gần trung tâm bàn cờ trước
-        legal_moves.sort(key=lambda m: abs(m[0] - self.center) + abs(m[1] - self.center))
+        # get_legal_moves() đã sort theo priority (nước thắng=3, nước chặn=2, thường=0).
+        # KHÔNG sort lại theo center — làm vậy sẽ xóa mất ordering tốt đó.
+        # Center bonus đã được tính trong heuristic() nên không cần ưu tiên ở đây.
 
-        # Bug 1 Fix: Gán nước đi dự phòng là nước tốt nhất (gần tâm nhất) 
-        # để tránh trả về None nếu timeout xảy ra ngay ở độ sâu 1.
-        final_best_move = legal_moves[0]
+        final_best_move  = legal_moves[0]
         final_best_score = -math.inf
 
-        # Bug 2: Nếu không có time_limit (benchmark), chạy thẳng ở độ sâu self.depth
+        # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
         search_range = [self.depth] if self.time_limit is None else range(1, self.depth + 1)
 
         for current_depth in search_range:
-            depth_best_move = None
+            depth_best_move  = None
             depth_best_score = -math.inf
-            
+
             try:
                 for move in legal_moves:
-                    # Bug 1: Kiểm tra time_limit trước khi so sánh
-                    if self.time_limit is not None and time.time() - self.start_time > self.time_limit:
+                    if self.time_limit is not None and \
+                       time.time() - self.start_time > self.time_limit:
                         raise SearchTimeout()
 
                     board.make_move(*move)
                     if mode == "minimax":
                         score = self.minimax(board, current_depth - 1, False)
-                    else: # alpha_beta
-                        score = self.alpha_beta(board, current_depth - 1, -math.inf, math.inf, False)
+                    else:
+                        score = self.alpha_beta(board, current_depth - 1,
+                                                -math.inf, math.inf, False)
                     board.undo_move()
-                    
+
                     if score > depth_best_score:
                         depth_best_score = score
-                        depth_best_move = move
-                
-                # Chỉ cập nhật kết quả cuối cùng khi đã hoàn thành trọn vẹn một độ sâu
-                final_best_move = depth_best_move
+                        depth_best_move  = move
+
+                # Cập nhật khi hoàn thành trọn một độ sâu
+                final_best_move  = depth_best_move
                 final_best_score = depth_best_score
-                
-                # Cập nhật Move Ordering: Đưa nước đi tốt nhất vừa tìm được lên đầu 
-                # để tối ưu hóa việc cắt tỉa Alpha-Beta ở độ sâu (depth) tiếp theo.
+
+                # Move ordering: đưa nước tốt nhất lên đầu cho depth kế tiếp
                 if final_best_move in legal_moves:
                     legal_moves.remove(final_best_move)
                     legal_moves.insert(0, final_best_move)
 
-                # Nếu tìm thấy nước đi thắng tuyệt đối, ngừng tìm kiếm sâu hơn
-                if final_best_score >= 1000000:
-                    break
+                if final_best_score >= 1_000_000:
+                    break  # Tìm thấy nước thắng tuyệt đối
+
             except SearchTimeout:
-                # Hết thời gian: Dừng tìm kiếm và trả về kết quả từ độ sâu hoàn thành gần nhất
                 break
-                
+
         duration = time.time() - self.start_time
         return final_best_move, final_best_score, self.nodes_visited, duration
 
+    # ──────────────────────────────────────────────────────────
+    # Alpha-Beta
+    # ──────────────────────────────────────────────────────────
     def alpha_beta(self, board, depth, alpha, beta, is_maximizing):
-        """Thuật toán Minimax với cắt tỉa Alpha-Beta (Level 2)."""
         self.nodes_visited += 1
 
-        # Tra cứu transposition table
-        board_hash = board.get_hash()
-        alpha_orig, beta_orig = alpha, beta
+        board_hash              = board.get_hash()
+        alpha_orig, beta_orig   = alpha, beta
+
         if board_hash in self.transposition_table:
             tt_depth, tt_flag, tt_val, _ = self.transposition_table[board_hash]
             if tt_depth >= depth:
-                if tt_flag == "EXACT": return tt_val
-                elif tt_flag == "LOWER": alpha = max(alpha, tt_val)
-                elif tt_flag == "UPPER": beta = min(beta, tt_val)
-                if alpha >= beta: return tt_val
-        
-        # Kiểm tra giới hạn thời gian (kiểm tra mỗi 100 node để giảm overhead)
+                if tt_flag == "EXACT":
+                    return tt_val
+                elif tt_flag == "LOWER":
+                    alpha = max(alpha, tt_val)
+                elif tt_flag == "UPPER":
+                    beta  = min(beta, tt_val)
+                if alpha >= beta:
+                    return tt_val
+
         if self.nodes_visited % 100 == 0:
-            if self.time_limit is not None and time.time() - self.start_time > self.time_limit:
+            if self.time_limit is not None and \
+               time.time() - self.start_time > self.time_limit:
                 raise SearchTimeout()
 
         result = board.check_win()
-        if result == self.player_id: return 1000000 + depth
-        if result == self.opp_id: return -1000000 - depth
-        if result == -1: return 0  # Hòa
-        if depth == 0: return self.heuristic(board)
+        if result == self.player_id:  return  1_000_000 + depth
+        if result == self.opp_id:     return -1_000_000 - depth
+        if result == -1:              return  0
+        if depth == 0:                return  self.heuristic(board)
 
         legal_moves = board.get_legal_moves()
 
@@ -1195,7 +1712,7 @@ class CaroAI:
                 val = self.alpha_beta(board, depth - 1, alpha, beta, False)
                 board.undo_move()
                 best_score = max(best_score, val)
-                alpha = max(alpha, val)
+                alpha      = max(alpha, val)
                 if beta <= alpha:
                     break
         else:
@@ -1205,121 +1722,170 @@ class CaroAI:
                 val = self.alpha_beta(board, depth - 1, alpha, beta, True)
                 board.undo_move()
                 best_score = min(best_score, val)
-                beta = min(beta, val)
+                beta       = min(beta, val)
                 if beta <= alpha:
                     break
 
-        # Lưu vào transposition table
-        flag = "UPPER" if best_score <= alpha_orig else ("LOWER" if best_score >= beta_orig else "EXACT")
+        flag = ("UPPER" if best_score <= alpha_orig
+                else "LOWER" if best_score >= beta_orig
+                else "EXACT")
         self.transposition_table[board_hash] = (depth, flag, best_score, None)
         return best_score
 
+    # ──────────────────────────────────────────────────────────
+    # Minimax thuần túy
+    # ──────────────────────────────────────────────────────────
     def minimax(self, board, depth, is_maximizing):
-        """Thuật toán Minimax thuần túy (Level 1)."""
         self.nodes_visited += 1
-        
+
         if self.nodes_visited % 100 == 0:
-            if self.time_limit is not None and time.time() - self.start_time > self.time_limit:
+            if self.time_limit is not None and \
+               time.time() - self.start_time > self.time_limit:
                 raise SearchTimeout()
 
         result = board.check_win()
-        if result == self.player_id: return 1000000 + depth
-        if result == self.opp_id: return -1000000 - depth
-        if result == -1: return 0
-        if depth == 0: return self.heuristic(board)
+        if result == self.player_id:  return  1_000_000 + depth
+        if result == self.opp_id:     return -1_000_000 - depth
+        if result == -1:              return  0
+        if depth == 0:                return  self.heuristic(board)
 
         legal_moves = board.get_legal_moves()
 
         if is_maximizing:
-            max_eval = -math.inf
+            best = -math.inf
             for move in legal_moves:
                 board.make_move(*move)
-                val = self.minimax(board, depth - 1, False)
+                best = max(best, self.minimax(board, depth - 1, False))
                 board.undo_move()
-                max_eval = max(max_eval, val)
-            return max_eval
+            return best
         else:
-            min_eval = math.inf
+            best = math.inf
             for move in legal_moves:
                 board.make_move(*move)
-                val = self.minimax(board, depth - 1, True)
+                best = min(best, self.minimax(board, depth - 1, True))
                 board.undo_move()
-                min_eval = min(min_eval, val)
-            return min_eval
+            return best
 
+    # ──────────────────────────────────────────────────────────
+    # Heuristic
+    # ──────────────────────────────────────────────────────────
     def heuristic(self, board):
-        """Hàm đánh giá cục diện bàn cờ."""
-        ai_score = self.calculate_player_score(board, self.player_id)
-        opp_score = self.calculate_player_score(board, self.opp_id)
-        
-        # Tính điểm AI − defense_multiplier × điểm đối thủ
-        return ai_score - (self.defense_multiplier * opp_score)
+        w = self.weights
+        ai_score   = self._score_for(board, self.player_id)
+        opp_score  = self._score_for(board, self.opp_id)
+        center_val = self._center_bonus(board)
+        return ai_score - w["defense_mult"] * opp_score + center_val
 
-    def calculate_player_score(self, board, player):
+    # ── Điểm vị trí trung tâm ──────────────────────────────
+    def _center_bonus(self, board):
+        """Cộng điểm cho mỗi quân của AI càng gần tâm càng cao."""
+        w      = self.weights
+        cb     = w["center_bonus"]
+        if cb == 0:
+            return 0
+        grid   = board.grid
+        size   = board.size
+        ctr    = self.center
+        bonus  = 0
+        player = self.player_id
+        for r in range(size):
+            for c in range(size):
+                if grid[r, c] == player:
+                    dist   = abs(r - ctr) + abs(c - ctr)
+                    bonus += max(0, cb - dist * 3)
+        return bonus
+
+    # ── Điểm pattern cho một người chơi ────────────────────
+    def _score_for(self, board, player):
         """
-        Đánh giá theo pattern cụ thể thay vì dùng weights tuyến tính.
-        
-        Thang điểm phản ánh mức độ nguy hiểm thực tế:
-          _OOO_  (open-three)      → 100,000  (gần thắng chắc)
-          OOO_   (half-open-three) →  10,000  (mối đe dọa mạnh)
-          _OO_   (open-two)        →   1,000
-          OO_    (half-open-two)   →     100
-          _O_    (single, 2 đầu)   →      10
+        Tổng hợp điểm từ:
+          1. Consecutive patterns  (open3 / half3 / open2 / half2 / open1)
+          2. Broken patterns       (broken4 / broken3) trong cửa sổ 5 ô
         """
-        score = 0
+        w        = self.weights
+        score    = 0
         size     = board.size
         grid     = board.grid
-        win_cond = board.win_condition
+        win_cond = board.win_condition   # = 4
         opp      = 3 - player
 
         for r in range(size):
             for c in range(size):
                 for dr, dc in board.DIRECTIONS:
+
+                    # ── 1. Consecutive (cửa sổ win_cond ô) ──
+                    # Chỉ tính khi các quân của player liền nhau, không có gap.
+                    # Nếu có gap → là broken pattern, đã được tính ở section 2.
+                    # Cách phát hiện gap: span (last_idx - first_idx + 1) phải == p_count.
                     end_r = r + (win_cond - 1) * dr
                     end_c = c + (win_cond - 1) * dc
-                    if not (0 <= end_r < size and 0 <= end_c < size):
+                    if 0 <= end_r < size and 0 <= end_c < size:
+                        p_count  = 0
+                        blocked  = False
+                        first_idx = -1
+                        last_idx  = -1
+
+                        for i in range(win_cond):
+                            v = grid[r + i*dr, c + i*dc]
+                            if v == player:
+                                p_count += 1
+                                if first_idx == -1:
+                                    first_idx = i
+                                last_idx = i
+                            elif v == opp:
+                                blocked = True
+                                break
+
+                        # Bỏ qua nếu bị chặn, rỗng, hoặc có gap giữa các quân
+                        is_consecutive = (
+                            not blocked
+                            and p_count > 0
+                            and (last_idx - first_idx + 1) == p_count
+                        )
+
+                        if is_consecutive:
+                            open_ends = 0
+                            pr, pc = r - dr, c - dc
+                            if 0 <= pr < size and 0 <= pc < size and grid[pr, pc] == 0:
+                                open_ends += 1
+                            nr, nc = end_r + dr, end_c + dc
+                            if 0 <= nr < size and 0 <= nc < size and grid[nr, nc] == 0:
+                                open_ends += 1
+
+                            if p_count == 3:
+                                if open_ends == 2:
+                                    score += w["open3"]
+                                elif open_ends == 1:
+                                    score += w["half3"]
+                            elif p_count == 2:
+                                if open_ends == 2:
+                                    score += w["open2"]
+                                elif open_ends == 1:
+                                    score += w["half2"]
+                            elif p_count == 1:
+                                if open_ends == 2:
+                                    score += w["open1"]
+
+                    # ── 2. Broken patterns (cửa sổ 5 ô) ──
+                    # Chỉ tính khi cửa sổ 5 ô nằm trong bàn
+                    end5_r = r + 4 * dr
+                    end5_c = c + 4 * dc
+                    if not (0 <= end5_r < size and 0 <= end5_c < size):
                         continue
 
-                    p_count    = 0
-                    is_blocked = False
-                    for i in range(win_cond):
-                        val = grid[r + i * dr, c + i * dc]
-                        if val == player:
-                            p_count += 1
-                        elif val == opp:
-                            is_blocked = True
-                            break
+                    w5 = [grid[r + i*dr, c + i*dc] for i in range(5)]
+                    if opp in w5:
+                        continue   # Bị địch chặn trong cửa sổ → không tính
 
-                    if is_blocked or p_count == 0:
-                        continue
+                    p5 = w5.count(player)
+                    z5 = w5.count(0)
 
-                    # Đếm đầu mở
-                    open_ends = 0
-                    prev_r, prev_c = r - dr, c - dc
-                    if 0 <= prev_r < size and 0 <= prev_c < size \
-                            and grid[prev_r, prev_c] == 0:
-                        open_ends += 1
-                    next_r, next_c = end_r + dr, end_c + dc
-                    if 0 <= next_r < size and 0 <= next_c < size \
-                            and grid[next_r, next_c] == 0:
-                        open_ends += 1
-
-                    # ── Gán điểm theo pattern ──
-                    if p_count == 3:
-                        if open_ends == 2:
-                            score += 100_000   # _OOO_  unstoppable
-                        elif open_ends == 1:
-                            score += 10_000    # OOO_   strong threat
-                    elif p_count == 2:
-                        if open_ends == 2:
-                            score += 1_000     # _OO_
-                        elif open_ends == 1:
-                            score += 100       # OO_
-                    elif p_count == 1:
-                        if open_ends == 2:
-                            score += 10
-                        else:
-                            score += 1
+                    # broken4: 4 quân + 1 trống trong 5 ô (XX_X hoặc X_XX)
+                    if p5 == 4 and z5 == 1:
+                        score += w["broken4"]
+                    # broken3: 3 quân + 2 trống trong 5 ô
+                    elif p5 == 3 and z5 == 2:
+                        score += w["broken3"]
 
         return score
 </file>
