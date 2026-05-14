@@ -33,7 +33,7 @@ GA_CONFIG = {
     "population_size": 24,
 
     # Số thế hệ
-    "generations": 60,
+    "generations": 38,
 
     # Số elite giữ nguyên sang thế hệ kế tiếp (không mutation)
     "elite_k": 4,
