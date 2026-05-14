@@ -12,21 +12,22 @@ class SearchTimeout(Exception):
 # ─────────────────────────────────────────────────────────────
 DEFAULT_WEIGHTS = {
     # Tấn công (AI)
-    "open3":        100_000,   # _XXX_  → gần thắng chắc, không có luật chặn 2 đầu
-    "half3":         10_000,   # XXX_   → mối đe dọa mạnh
-    "broken4":       80_000,   # XX_X hoặc X_XX → chỉ cần 1 nước là thắng
-    "open2":          1_000,   # _XX_
-    "half2":            100,   # XX_ hoặc _XX (1 đầu bị chặn)
-    "broken3":        3_000,   # X_XX_ hoặc _X_X_ (3 quân trong 5 ô)
+    "open3":        250_000,   # _XXX_  → Thắng chắc trong luật 4
+    "half3":        100_000,   # XXX_   → Buộc phải chặn ngay trong luật 4
+    "broken4":      100_000,   # XX_X   → Nguy hiểm tương đương half3
+    "open2":          5_000,   # _XX_
+    "half2":          1_000,   # XX_
+    "broken3":       10_000,   # X_X_
     "open1":             10,   # _X_
 
     # Hệ số phòng thủ: nhân vào điểm của đối thủ
     # > 1.0: thiên về phòng thủ; < 1.0: thiên về tấn công
     # Không có luật chặn 2 đầu → open3 của địch rất nguy hiểm → nên > 1.0
-    "defense_mult":    1.15,
+    "defense_mult":    1.20,
 
     # Bonus vị trí: cộng thêm cho quân gần tâm
-    "center_bonus":      40,   # điểm tối đa tại tâm, giảm dần theo khoảng cách
+    "center_bonus":      40,
+    "fork_bonus":   500_000,   # 2 open3 cùng lúc = gần như thắng chắc
 }
 
 
@@ -43,8 +44,15 @@ class CaroAI:
         self.depth     = depth
         self.weights   = weights if weights is not None else dict(DEFAULT_WEIGHTS)
 
+        # Điểm 3: Precompute Center Weights để tránh tính toán lặp lại
+        size = 9 # Mặc định size 9 cho Caro
+        ctr = size // 2
+        cb = self.weights.get("center_bonus", 40)
+        self.center_weights = [[max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) 
+                                for c in range(size)] for r in range(size)]
+
         self.nodes_visited     = 0
-        self.center            = 0
+        self.center            = ctr
         self.start_time        = 0
         self.time_limit        = 0
         self.transposition_table = {}
@@ -52,7 +60,7 @@ class CaroAI:
     # ──────────────────────────────────────────────────────────
     # Giao diện chính
     # ──────────────────────────────────────────────────────────
-    def get_move(self, board, mode="alpha_beta", time_limit=8.0):
+    def get_move(self, board, mode="pvs", time_limit=10.0):
         """
         Trả về: (best_move, best_score, nodes_visited, time_taken)
         time_limit=None → bỏ qua iterative deepening, chạy thẳng depth.
@@ -74,11 +82,22 @@ class CaroAI:
         # KHÔNG sort lại theo center — làm vậy sẽ xóa mất ordering tốt đó.
         # Center bonus đã được tính trong heuristic() nên không cần ưu tiên ở đây.
 
+        # BƯỚC 0: Kiểm tra nước thắng ngay (depth=1)
+        for move in legal_moves:
+            if board.fast_check_win(move[0], move[1], self.player_id):
+                return move, 1_000_000, 1, time.time() - self.start_time
+
+        # BƯỚC 0.5: Chặn đối thủ thắng ngay (Bắt buộc phải chặn trước khi nghĩ đến Fork)
+        for move in legal_moves:
+            if board.fast_check_win(move[0], move[1], self.opp_id):
+                return move, 950_000, 1, time.time() - self.start_time
+
         final_best_move  = legal_moves[0]
         final_best_score = -math.inf
 
         # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
-        search_range = [self.depth] if self.time_limit is None else range(1, self.depth + 1)
+        # Sửa: Chỉ dùng Depth chẵn để tránh Horizon Effect (2, 4)
+        search_range = [self.depth] if self.time_limit is None else range(2, self.depth + 1, 2)
 
         for current_depth in search_range:
             depth_best_move  = None
@@ -105,11 +124,11 @@ class CaroAI:
                         depth_best_score = score
                         depth_best_move  = move
 
-                # Cập nhật khi hoàn thành trọn một độ sâu
+                # [QUAN TRỌNG] Chỉ cập nhật kết quả cuối cùng khi đã hoàn thành trọn vẹn độ sâu này
                 final_best_move  = depth_best_move
                 final_best_score = depth_best_score
 
-                # Move ordering: đưa nước tốt nhất lên đầu cho depth kế tiếp
+                # Move ordering: đưa nước tốt nhất của độ sâu vừa hoàn thành lên đầu cho lần lặp kế tiếp
                 if final_best_move in legal_moves:
                     legal_moves.remove(final_best_move)
                     legal_moves.insert(0, final_best_move)
@@ -340,37 +359,8 @@ class CaroAI:
     # Heuristic
     # ──────────────────────────────────────────────────────────
     def heuristic(self, board):
-        w = self.weights
-        ai_score   = self._score_for(board, self.player_id)
-        opp_score  = self._score_for(board, self.opp_id)
-        center_val = self._center_bonus(board)
-        return ai_score - w["defense_mult"] * opp_score + center_val
-
-    # ── Điểm vị trí trung tâm ──────────────────────────────
-    def _center_bonus(self, board):
-        """Cộng điểm cho mỗi quân của AI càng gần tâm càng cao."""
-        w      = self.weights
-        cb     = w["center_bonus"]
-        if cb == 0:
-            return 0
-        grid   = board.grid
-        size   = board.size
-        ctr    = self.center
-        bonus  = 0
-        player = self.player_id
-        for r in range(size):
-            for c in range(size):
-                if grid[r, c] == player:
-                    dist   = abs(r - ctr) + abs(c - ctr)
-                    bonus += max(0, cb - dist * 3)
-        return bonus
-
-    # ── Điểm pattern cho một người chơi ────────────────────
-    def _score_for(self, board, player):
         """
-        Tổng hợp điểm từ:
-          1. Consecutive patterns  (open3 / half3 / open2 / half2 / open1)
-          2. Broken patterns       (broken4 / broken3) trong cửa sổ 5 ô
+        Lượng giá O(1): Trả về ngay lập tức điểm số đã được tính sẵn bởi bàn cờ.
         """
         w        = self.weights
         score    = 0
