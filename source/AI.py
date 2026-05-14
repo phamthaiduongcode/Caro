@@ -362,8 +362,89 @@ class CaroAI:
         """
         Lượng giá O(1): Trả về ngay lập tức điểm số đã được tính sẵn bởi bàn cờ.
         """
-        # current_score được tính từ góc nhìn của Player 2 (O).
-        # Nếu AI là Player 1 (X), ta cần đảo ngược dấu.
-        if self.player_id == 1:
-            return -board.current_score
-        return board.current_score
+        w        = self.weights
+        score    = 0
+        size     = board.size
+        grid     = board.grid
+        win_cond = board.win_condition   # = 4
+        opp      = 3 - player
+
+        for r in range(size):
+            for c in range(size):
+                for dr, dc in board.DIRECTIONS:
+
+                    # ── 1. Consecutive (cửa sổ win_cond ô) ──
+                    # Chỉ tính khi các quân của player liền nhau, không có gap.
+                    # Nếu có gap → là broken pattern, đã được tính ở section 2.
+                    # Cách phát hiện gap: span (last_idx - first_idx + 1) phải == p_count.
+                    end_r = r + (win_cond - 1) * dr
+                    end_c = c + (win_cond - 1) * dc
+                    if 0 <= end_r < size and 0 <= end_c < size:
+                        p_count  = 0
+                        blocked  = False
+                        first_idx = -1
+                        last_idx  = -1
+
+                        for i in range(win_cond):
+                            v = grid[r + i*dr, c + i*dc]
+                            if v == player:
+                                p_count += 1
+                                if first_idx == -1:
+                                    first_idx = i
+                                last_idx = i
+                            elif v == opp:
+                                blocked = True
+                                break
+
+                        # Bỏ qua nếu bị chặn, rỗng, hoặc có gap giữa các quân
+                        is_consecutive = (
+                            not blocked
+                            and p_count > 0
+                            and (last_idx - first_idx + 1) == p_count
+                        )
+
+                        if is_consecutive:
+                            open_ends = 0
+                            pr, pc = r - dr, c - dc
+                            if 0 <= pr < size and 0 <= pc < size and grid[pr, pc] == 0:
+                                open_ends += 1
+                            nr, nc = end_r + dr, end_c + dc
+                            if 0 <= nr < size and 0 <= nc < size and grid[nr, nc] == 0:
+                                open_ends += 1
+
+                            if p_count == 3:
+                                if open_ends == 2:
+                                    score += w["open3"]
+                                elif open_ends == 1:
+                                    score += w["half3"]
+                            elif p_count == 2:
+                                if open_ends == 2:
+                                    score += w["open2"]
+                                elif open_ends == 1:
+                                    score += w["half2"]
+                            elif p_count == 1:
+                                if open_ends == 2:
+                                    score += w["open1"]
+
+                    # ── 2. Broken patterns (cửa sổ 5 ô) ──
+                    # Chỉ tính khi cửa sổ 5 ô nằm trong bàn
+                    end5_r = r + 4 * dr
+                    end5_c = c + 4 * dc
+                    if not (0 <= end5_r < size and 0 <= end5_c < size):
+                        continue
+
+                    w5 = [grid[r + i*dr, c + i*dc] for i in range(5)]
+                    if opp in w5:
+                        continue   # Bị địch chặn trong cửa sổ → không tính
+
+                    p5 = w5.count(player)
+                    z5 = w5.count(0)
+
+                    # broken4: 4 quân + 1 trống trong 5 ô (XX_X hoặc X_XX)
+                    if p5 == 4 and z5 == 1:
+                        score += w["broken4"]
+                    # broken3: 3 quân + 2 trống trong 5 ô
+                    elif p5 == 3 and z5 == 2:
+                        score += w["broken3"]
+
+        return score
