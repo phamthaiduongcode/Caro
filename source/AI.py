@@ -91,14 +91,11 @@ class CaroAI:
                         raise SearchTimeout()
 
                     board.make_move(*move)
-                    # Đoạn code cũ trong get_move
                     if mode == "minimax":
                         score = self.minimax(board, current_depth - 1, False)
-                    elif mode == "alpha_beta":
-                        score = self.alpha_beta(board, current_depth - 1, -math.inf, math.inf, False)
-                    # [MỚI] Thêm nhánh gọi PVS
-                    elif mode == "pvs":
-                        score = self.pvs(board, current_depth - 1, -math.inf, math.inf, False)
+                    else:
+                        score = self.alpha_beta(board, current_depth - 1,
+                                                -math.inf, math.inf, False)
                     board.undo_move()
 
                     if score > depth_best_score:
@@ -126,21 +123,14 @@ class CaroAI:
     # ──────────────────────────────────────────────────────────
     # Alpha-Beta
     # ──────────────────────────────────────────────────────────
-    # ──────────────────────────────────────────────────────────
-    # Alpha-Beta (Đã tối ưu: Move Ordering với TT-Move)
-    # ──────────────────────────────────────────────────────────
     def alpha_beta(self, board, depth, alpha, beta, is_maximizing):
         self.nodes_visited += 1
 
         board_hash              = board.get_hash()
         alpha_orig, beta_orig   = alpha, beta
-        
-        # [MỚI] Biến để hứng nước đi tốt nhất từ TT
-        tt_move = None 
 
         if board_hash in self.transposition_table:
-            # [MỚI] Lấy tt_move ra từ index thứ 3 của tuple
-            tt_depth, tt_flag, tt_val, tt_move = self.transposition_table[board_hash]
+            tt_depth, tt_flag, tt_val, _ = self.transposition_table[board_hash]
             if tt_depth >= depth:
                 if tt_flag == "EXACT":
                     return tt_val
@@ -151,7 +141,6 @@ class CaroAI:
                 if alpha >= beta:
                     return tt_val
 
-        # Kiểm tra timeout (giữ nguyên của bạn)
         if self.nodes_visited % 100 == 0:
             if self.time_limit is not None and \
                time.time() - self.start_time > self.time_limit:
@@ -165,31 +154,14 @@ class CaroAI:
 
         legal_moves = board.get_legal_moves()
 
-        # ────────────────────────────────────────────────────
-        # [MỚI] TT-MOVE ORDERING
-        # Nếu TT có lưu nước đi tốt nhất cho trạng thái này,
-        # đẩy nó lên đầu danh sách để Alpha-Beta cắt nhánh sớm nhất!
-        # ────────────────────────────────────────────────────
-        if tt_move is not None and tt_move in legal_moves:
-            legal_moves.remove(tt_move)
-            legal_moves.insert(0, tt_move)
-
-        # [MỚI] Biến theo dõi nước đi tốt nhất trong nhánh này để lưu vào TT
-        best_move_found = None 
-
         if is_maximizing:
             best_score = -math.inf
             for move in legal_moves:
                 board.make_move(*move)
                 val = self.alpha_beta(board, depth - 1, alpha, beta, False)
                 board.undo_move()
-                
-                # [MỚI] Cập nhật best_move_found
-                if val > best_score:
-                    best_score = val
-                    best_move_found = move 
-                    
-                alpha = max(alpha, best_score)
+                best_score = max(best_score, val)
+                alpha      = max(alpha, val)
                 if beta <= alpha:
                     break
         else:
@@ -198,110 +170,17 @@ class CaroAI:
                 board.make_move(*move)
                 val = self.alpha_beta(board, depth - 1, alpha, beta, True)
                 board.undo_move()
-                
-                # [MỚI] Cập nhật best_move_found
-                if val < best_score:
-                    best_score = val
-                    best_move_found = move
-                    
-                beta = min(beta, best_score)
+                best_score = min(best_score, val)
+                beta       = min(beta, val)
                 if beta <= alpha:
                     break
 
         flag = ("UPPER" if best_score <= alpha_orig
                 else "LOWER" if best_score >= beta_orig
                 else "EXACT")
-                
-        # [MỚI] Lưu best_move_found vào TT thay vì để None
-        self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
+        self.transposition_table[board_hash] = (depth, flag, best_score, None)
         return best_score
-# ──────────────────────────────────────────────────────────
-    # Principal Variation Search (PVS) - Đẳng cấp Game Engine
-    # ──────────────────────────────────────────────────────────
-    def pvs(self, board, depth, alpha, beta, is_maximizing):
-        self.nodes_visited += 1
 
-        board_hash = board.get_hash()
-        alpha_orig, beta_orig = alpha, beta
-        tt_move = None
-
-        # 1. Kiểm tra Transposition Table
-        if board_hash in self.transposition_table:
-            tt_depth, tt_flag, tt_val, tt_move = self.transposition_table[board_hash]
-            if tt_depth >= depth:
-                if tt_flag == "EXACT": return tt_val
-                elif tt_flag == "LOWER": alpha = max(alpha, tt_val)
-                elif tt_flag == "UPPER": beta = min(beta, tt_val)
-                if alpha >= beta: return tt_val
-
-        if self.nodes_visited % 100 == 0 and self.time_limit is not None:
-            if time.time() - self.start_time > self.time_limit:
-                raise SearchTimeout()
-
-        result = board.check_win()
-        if result == self.player_id: return 1_000_000 + depth
-        if result == self.opp_id:    return -1_000_000 - depth
-        if result == -1:             return 0
-        if depth == 0:               return self.heuristic(board)
-
-        legal_moves = board.get_legal_moves()
-
-        # Đưa TT-Move lên đầu để PVS phát huy tối đa sức mạnh
-        if tt_move is not None and tt_move in legal_moves:
-            legal_moves.remove(tt_move)
-            legal_moves.insert(0, tt_move)
-
-        best_move_found = None
-
-        if is_maximizing:
-            best_score = -math.inf
-            for i, move in enumerate(legal_moves):
-                board.make_move(*move)
-                
-                if i == 0:
-                    # Nước đi đầu tiên (Principal Variation): Duyệt full window
-                    val = self.pvs(board, depth - 1, alpha, beta, False)
-                else:
-                    # Các nước sau: Duyệt Null Window (alpha, alpha + 1) để chứng minh nó tệ hơn
-                    val = self.pvs(board, depth - 1, alpha, alpha + 1, False)
-                    if alpha < val < beta:
-                        # Fail-high (phát hiện nước này tốt hơn dự kiến), duyệt lại full window
-                        val = self.pvs(board, depth - 1, val, beta, False)
-                        
-                board.undo_move()
-
-                if val > best_score:
-                    best_score = val
-                    best_move_found = move
-                alpha = max(alpha, best_score)
-                if beta <= alpha:
-                    break # Cut-off
-        else:
-            best_score = math.inf
-            for i, move in enumerate(legal_moves):
-                board.make_move(*move)
-                
-                if i == 0:
-                    val = self.pvs(board, depth - 1, alpha, beta, True)
-                else:
-                    # Null Window cho MIN player
-                    val = self.pvs(board, depth - 1, beta - 1, beta, True)
-                    if alpha < val < beta:
-                        val = self.pvs(board, depth - 1, alpha, val, True)
-                        
-                board.undo_move()
-
-                if val < best_score:
-                    best_score = val
-                    best_move_found = move
-                beta = min(beta, best_score)
-                if beta <= alpha:
-                    break # Cut-off
-
-        # Lưu lại TT
-        flag = "UPPER" if best_score <= alpha_orig else "LOWER" if best_score >= beta_orig else "EXACT"
-        self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
-        return best_score
     # ──────────────────────────────────────────────────────────
     # Minimax thuần túy
     # ──────────────────────────────────────────────────────────
