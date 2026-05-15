@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 import pygame
 import os
 import sys
@@ -442,7 +443,7 @@ class GameScreen:
             cell = self._cell_at(event.pos)
             if cell:
                 row, col = cell
-                if self.board_obj.grid[row, col] == 0:
+                if self.board_obj.grid[row][col] == 0:
                     placed = self._place_move(row, col)
                     if placed and not self.game_over and self.mode == "Ai":
                         self._trigger_ai()
@@ -507,7 +508,7 @@ class GameScreen:
         half   = self.CELL // 2          # 20px – tâm ô
         for r in range(BOARD_SIZE):
             for c in range(BOARD_SIZE):
-                p = int(self.board_obj.grid[r, c])
+                p = int(self.board_obj.grid[r][c])
                 if p in (PLAYER_X, PLAYER_O):
                     img = self.token_x if p == PLAYER_X else self.token_o
                     token_rect = img.get_rect(
