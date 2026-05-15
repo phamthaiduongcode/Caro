@@ -4,9 +4,14 @@ class Board:
     DIRECTIONS = [(0, 1), (1, 0), (1, 1), (1, -1)]
     _NEIGHBOR_OFFSETS = [(dr, dc) for dr in range(-2, 3) for dc in range(-2, 3) if dr or dc]
 
-    # Pre-compute score lookup để tránh if-else chain trong inner loop
-    _SCORE_TABLE  = [0, 10, 100, 10000, 1000000, 1000000]
-    _OSCORE_TABLE = [0, 12, 120, 12000, 1200000, 1200000]
+    # Trọng số được tinh chỉnh để phản ánh Open vs Half patterns
+    # Open3 = 250k (chia 2 vì 1 thế Open3 tạo ra 2 cửa sổ trượt có điểm)
+    # Half3 = 100k
+    WIN_SCORE = 1_000_000
+    OPEN3_WIN_VAL = 125_000   # _XXX_ tạo ra 2 cửa sổ => 250,000
+    HALF3_WIN_VAL = 40_000    # OXXX_ hoặc _XXXO => chỉ nên nhận ~80,000 - 100,000 tổng
+    OPEN2_WIN_VAL = 2_500
+    HALF2_WIN_VAL = 500
 
     def __init__(self, size=9, win_condition=4):
         if size < 9:
@@ -64,37 +69,76 @@ class Board:
     def get_hash(self):
         return self.current_hash
 
+    def _get_window_score(self, p_cnt, o_cnt, is_blocked_start, is_blocked_end, is_ai):
+        """Hàm lượng giá cửa sổ thông minh: Phân biệt Open/Half/Blocked."""
+        if p_cnt > 0 and o_cnt > 0: return 0
+        
+        count = p_cnt if is_ai else o_cnt
+        if count == 0: return 0
+        if count >= self.win_condition: return self.WIN_SCORE
+
+        # Nếu bị chặn cả 2 đầu -> Cửa sổ này vô dụng (trừ khi đã thắng)
+        if is_blocked_start and is_blocked_end: return 0
+
+        # Phân loại dựa trên số đầu trống
+        is_open = not is_blocked_start and not is_blocked_end
+        
+        if count == 3:
+            return self.OPEN3_WIN_VAL if is_open else self.HALF3_WIN_VAL
+        if count == 2:
+            return self.OPEN2_WIN_VAL if is_open else self.HALF2_WIN_VAL
+        return 10 # count == 1
+
     def _compute_score_delta(self, row, col, player) -> int:
         opp  = 3 - player
         delta = 0
         wc    = self.win_condition
         size  = self.size
         grid  = self.grid
-        SCORE  = self._SCORE_TABLE
-        OSCORE = self._OSCORE_TABLE
 
         for dr, dc in self.DIRECTIONS:
-            for offset in range(wc):
-                sr = row - offset * dr;  sc = col - offset * dc
-                er = sr + (wc-1) * dr;   ec = sc + (wc-1) * dc
-                if not (0 <= sr < size and 0 <= sc < size and
-                        0 <= er < size and 0 <= ec < size):
-                    continue
-
-                p_cnt = o_cnt = 0
-                for i in range(wc):
-                    cell = grid[(sr + i*dr)*size + sc + i*dc]
-                    if   cell == player: p_cnt += 1
-                    elif cell == opp:    o_cnt += 1
-
-                if o_cnt == 0 and p_cnt > 0:
-                    wd = SCORE[p_cnt+1] - SCORE[p_cnt]
-                elif p_cnt == 0 and o_cnt > 0:
-                    wd = -OSCORE[o_cnt]
+            # "Phóng tia": Lấy dữ liệu 1 đường thẳng duy nhất chứa ô vừa đánh
+            # wc=4 -> lấy 4 ô mỗi phía để bao quát mọi cửa sổ 4 ô chứa điểm này
+            line = []
+            for i in range(-wc, wc + 1):
+                r, c = row + i*dr, col + i*dc
+                if 0 <= r < size and 0 <= c < size:
+                    line.append(grid[r*size + c])
                 else:
-                    continue
+                    line.append(-1) # Biên bàn cờ tính là chặn
 
-                delta += wd if player == 2 else -wd
+            # Quét các cửa sổ kích thước wc đi qua điểm trung tâm (index wc trong line)
+            for start in range(1, wc + 1):
+                end = start + wc
+                window = line[start:end]
+                
+                p1_cnt = window.count(1)
+                p2_cnt = window.count(2)
+
+                # Nếu cửa sổ hỗn tạp (có cả X và O) -> 0 điểm, không cần tính delta
+                if p1_cnt > 0 and p2_cnt > 0: continue
+                
+                for p_idx in (1, 2):
+                    if (p_idx == 1 and p2_cnt > 0) or (p_idx == 2 and p1_cnt > 0): continue
+                    
+                    other = 3 - p_idx
+                    is_ai = (p_idx == 2)
+                    cnt = p1_cnt if p_idx == 1 else p2_cnt
+                    
+                    # Check chặn bằng dữ liệu từ 'line' đã fetch
+                    b_s = (line[start-1] == other or line[start-1] == -1)
+                    b_e = (line[end] == other or line[end] == -1)
+
+                    if player == p_idx: # Tăng điểm cho quân mình
+                        s_before = self._get_window_score(cnt, 0, b_s, b_e, is_ai)
+                        s_after  = self._get_window_score(cnt + 1, 0, b_s, b_e, is_ai)
+                    else: # Chặn điểm của đối thủ (đối thủ đang có quân trong window này)
+                        if cnt == 0: continue
+                        s_before = self._get_window_score(cnt, 0, b_s, b_e, is_ai)
+                        s_after  = 0
+                    
+                    wd = s_after - s_before
+                    delta += wd if is_ai else -wd
 
         ctr = size >> 1
         center_val = max(0, 40 - (abs(row-ctr) + abs(col-ctr)) * 3)
@@ -217,24 +261,30 @@ class Board:
         return blocks + normal
 
     def evaluate_position(self, r, c, player):
-        score = 0; opp = 3 - player
-        grid = self.grid; size = self.size; wc = self.win_condition
+        """Đưa evaluate_position về cùng logic 'Phóng tia' để đảm bảo tính nhất quán."""
+        score = 0
+        size, grid, wc = self.size, self.grid, self.win_condition
         for dr, dc in self.DIRECTIONS:
-            for offset in range(wc):
-                sr, sc = r - offset*dr, c - offset*dc
-                er, ec = sr+(wc-1)*dr, sc+(wc-1)*dc
-                if not (0<=sr<size and 0<=sc<size and 0<=er<size and 0<=ec<size): continue
-                p_cnt = o_cnt = 0
-                for i in range(wc):
-                    cell = grid[(sr+i*dr)*size + sc+i*dc]
-                    if cell == player: p_cnt += 1
-                    elif cell == opp:  o_cnt += 1
-                if p_cnt > 0 and o_cnt == 0:
-                    score += (1000000 if p_cnt==wc else 10000 if p_cnt==wc-1 else 100 if p_cnt==wc-2 else 10)
-                elif o_cnt > 0 and p_cnt == 0:
-                    score -= (1200000 if o_cnt==wc else 12000 if o_cnt==wc-1 else 120 if o_cnt==wc-2 else 12)
+            line = []
+            for i in range(-wc, wc + 1):
+                nr, nc = r + i*dr, c + i*dc
+                line.append(grid[nr*size + nc] if (0 <= nr < size and 0 <= nc < size) else -1)
+            
+            for start in range(1, wc + 1):
+                window = line[start : start + wc]
+                p1, p2 = window.count(1), window.count(2)
+                if p1 > 0 and p2 > 0: continue
+                
+                for p_idx in (1, 2):
+                    if (p_idx == 1 and p2 > 0) or (p_idx == 2 and p1 > 0): continue
+                    cnt, other, is_ai = (p1 if p_idx == 1 else p2), 3 - p_idx, (p_idx == 2)
+                    b_s = (line[start - 1] == other or line[start - 1] == -1)
+                    b_e = (line[start + wc] == other or line[start + wc] == -1)
+                    s = self._get_window_score(cnt, 0, b_s, b_e, is_ai)
+                    score += s if (is_ai == (player == 2)) else -s
+                    
         ctr = size >> 1
-        score += max(0, 40 - (abs(r-ctr)+abs(c-ctr))*3)
+        score += max(0, 40 - (abs(r - ctr) + abs(c - ctr)) * 3)
         return score
 
     def copy(self):
