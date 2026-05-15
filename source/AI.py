@@ -32,10 +32,9 @@ DEFAULT_WEIGHTS = {
 
 
 class CaroAI:
-    def __init__(self, player_id, depth=3, weights=None):
+    def __init__(self, player_id, depth, weights=None):
         """
-        Args:
-            player_id: 1 (X) hoặc 2 (O)
+        Args: player_id: 1 (X) hoặc 2 (O)
             depth:     độ sâu tìm kiếm tối đa
             weights:   dict trọng số (dùng DEFAULT_WEIGHTS nếu None)
         """
@@ -44,15 +43,13 @@ class CaroAI:
         self.depth     = depth
         self.weights   = weights if weights is not None else dict(DEFAULT_WEIGHTS)
 
-        # Điểm 3: Precompute Center Weights để tránh tính toán lặp lại
-        size = 9 # Mặc định size 9 cho Caro
-        ctr = size // 2
-        cb = self.weights.get("center_bonus", 40)
-        self.center_weights = [[max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) 
-                                for c in range(size)] for r in range(size)]
+        # FIX #4: Xoá "size = 9" cứng và self.center_weights precompute tại đây.
+        # center_weights sẽ được tính trong get_move() khi đã biết board.size thực tế,
+        # tránh IndexError khi board là 15×15 nhưng center_weights chỉ có 9×9.
+        self.center_weights = None   # Sẽ được khởi tạo trong get_move()
 
         self.nodes_visited     = 0
-        self.center            = ctr
+        self.center            = 0
         self.start_time        = 0
         self.time_limit        = 0
         self.transposition_table = {}
@@ -73,6 +70,15 @@ class CaroAI:
         self.player_id = board.current_player
         self.opp_id    = 3 - self.player_id
         self.center    = board.size // 2
+
+        # FIX #4 (tiếp): Tính center_weights ngay tại đây khi đã biết board.size thực tế.
+        size = board.size
+        ctr  = size // 2
+        cb   = self.weights.get("center_bonus", 40)
+        self.center_weights = [
+            [max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) for c in range(size)]
+            for r in range(size)
+        ]
 
         legal_moves = board.get_legal_moves()
         if not legal_moves:
@@ -275,11 +281,18 @@ class CaroAI:
         """
         w        = self.weights
         score    = 0
+        opp_score = 0   # FIX #2: Biến tích lũy điểm cho đối thủ
         size     = board.size
         grid     = board.grid
         win_cond = board.win_condition   # = 4
-        opp      = 3 - player
+        opp      = 3 - self.player_id
 
+        # FIX #6: Đếm số hướng có open3 để phát hiện fork
+        open3_count = 0
+
+        # ══════════════════════════════════════════════════════
+        # Vòng lặp 1: Tính điểm TẤN CÔNG cho self.player_id
+        # ══════════════════════════════════════════════════════
         for r in range(size):
             for c in range(size):
                 for dr, dc in board.DIRECTIONS:
@@ -297,8 +310,9 @@ class CaroAI:
                         last_idx  = -1
 
                         for i in range(win_cond):
-                            v = grid[r + i*dr, c + i*dc]
-                            if v == player:
+                            # FIX #1: Dùng grid[r + i*dr][c + i*dc] thay vì grid[r + i*dr, c + i*dc]
+                            v = grid[r + i*dr][c + i*dc]
+                            if v == self.player_id:
                                 p_count += 1
                                 if first_idx == -1:
                                     first_idx = i
@@ -317,15 +331,18 @@ class CaroAI:
                         if is_consecutive:
                             open_ends = 0
                             pr, pc = r - dr, c - dc
-                            if 0 <= pr < size and 0 <= pc < size and grid[pr, pc] == 0:
+                            # FIX #1: Dùng grid[pr][pc] thay vì grid[pr, pc]
+                            if 0 <= pr < size and 0 <= pc < size and grid[pr][pc] == 0:
                                 open_ends += 1
                             nr, nc = end_r + dr, end_c + dc
-                            if 0 <= nr < size and 0 <= nc < size and grid[nr, nc] == 0:
+                            # FIX #1: Dùng grid[nr][nc] thay vì grid[nr, nc]
+                            if 0 <= nr < size and 0 <= nc < size and grid[nr][nc] == 0:
                                 open_ends += 1
 
                             if p_count == 3:
                                 if open_ends == 2:
                                     score += w["open3"]
+                                    open3_count += 1   # FIX #6: Đếm open3 để phát hiện fork
                                 elif open_ends == 1:
                                     score += w["half3"]
                             elif p_count == 2:
@@ -344,18 +361,118 @@ class CaroAI:
                     if not (0 <= end5_r < size and 0 <= end5_c < size):
                         continue
 
-                    w5 = [grid[r + i*dr, c + i*dc] for i in range(5)]
+                    # FIX #1: Dùng grid[r + i*dr][c + i*dc] thay vì grid[r + i*dr, c + i*dc]
+                    w5 = [grid[r + i*dr][c + i*dc] for i in range(5)]
                     if opp in w5:
                         continue   # Bị địch chặn trong cửa sổ → không tính
 
-                    p5 = w5.count(player)
+                    p5 = w5.count(self.player_id)
                     z5 = w5.count(0)
 
                     # broken4: 4 quân + 1 trống trong 5 ô (XX_X hoặc X_XX)
                     if p5 == 4 and z5 == 1:
                         score += w["broken4"]
                     # broken3: 3 quân + 2 trống trong 5 ô
+                    # FIX #3: Loại trừ trường hợp 3 quân LIÊN TIẾP (đã được đếm ở open3/half3)
+                    # Phát hiện bằng cách tìm first/last index của player_id trong w5;
+                    # nếu last - first + 1 == p5 thì là consecutive → bỏ qua, không tính broken.
                     elif p5 == 3 and z5 == 2:
-                        score += w["broken3"]
+                        first5 = next(i for i in range(5) if w5[i] == self.player_id)
+                        last5  = next(i for i in range(4, -1, -1) if w5[i] == self.player_id)
+                        is_consecutive5 = (last5 - first5 + 1) == p5   # FIX #3: kiểm tra liên tiếp
+                        if not is_consecutive5:   # FIX #3: chỉ cộng broken3 khi thực sự có gap
+                            score += w["broken3"]
 
-        return score
+        # FIX #6: Nếu AI có từ 2 open3 trở lên đồng thời → fork → cộng fork_bonus
+        if open3_count >= 2:
+            score += w["fork_bonus"]
+
+        # ══════════════════════════════════════════════════════
+        # Vòng lặp 2: Tính điểm PHÒNG THỦ cho opp_id (FIX #2)
+        # Cấu trúc giống hệt vòng lặp 1 nhưng swap self.player_id ↔ opp
+        # ══════════════════════════════════════════════════════
+        for r in range(size):
+            for c in range(size):
+                for dr, dc in board.DIRECTIONS:
+
+                    end_r = r + (win_cond - 1) * dr
+                    end_c = c + (win_cond - 1) * dc
+                    if 0 <= end_r < size and 0 <= end_c < size:
+                        p_count  = 0
+                        blocked  = False
+                        first_idx = -1
+                        last_idx  = -1
+
+                        for i in range(win_cond):
+                            # FIX #1 + FIX #2: Tính cho opp, dùng indexing đúng
+                            v = grid[r + i*dr][c + i*dc]
+                            if v == opp:
+                                p_count += 1
+                                if first_idx == -1:
+                                    first_idx = i
+                                last_idx = i
+                            elif v == self.player_id:
+                                blocked = True
+                                break
+
+                        is_consecutive = (
+                            not blocked
+                            and p_count > 0
+                            and (last_idx - first_idx + 1) == p_count
+                        )
+
+                        if is_consecutive:
+                            open_ends = 0
+                            pr, pc = r - dr, c - dc
+                            if 0 <= pr < size and 0 <= pc < size and grid[pr][pc] == 0:
+                                open_ends += 1
+                            nr, nc = end_r + dr, end_c + dc
+                            if 0 <= nr < size and 0 <= nc < size and grid[nr][nc] == 0:
+                                open_ends += 1
+
+                            if p_count == 3:
+                                if open_ends == 2:
+                                    opp_score += w["open3"]   # FIX #2
+                                elif open_ends == 1:
+                                    opp_score += w["half3"]   # FIX #2
+                            elif p_count == 2:
+                                if open_ends == 2:
+                                    opp_score += w["open2"]   # FIX #2
+                                elif open_ends == 1:
+                                    opp_score += w["half2"]   # FIX #2
+                            elif p_count == 1:
+                                if open_ends == 2:
+                                    opp_score += w["open1"]   # FIX #2
+
+                    end5_r = r + 4 * dr
+                    end5_c = c + 4 * dc
+                    if not (0 <= end5_r < size and 0 <= end5_c < size):
+                        continue
+
+                    # FIX #1 + FIX #2: Tính w5 cho opp, indexing đúng
+                    w5 = [grid[r + i*dr][c + i*dc] for i in range(5)]
+                    if self.player_id in w5:
+                        continue   # Bị AI chặn trong cửa sổ → không tính
+
+                    p5 = w5.count(opp)
+                    z5 = w5.count(0)
+
+                    if p5 == 4 and z5 == 1:
+                        opp_score += w["broken4"]   # FIX #2
+                    elif p5 == 3 and z5 == 2:
+                        # FIX #3 (áp dụng nhất quán cho vòng lặp opp)
+                        first5 = next(i for i in range(5) if w5[i] == opp)
+                        last5  = next(i for i in range(4, -1, -1) if w5[i] == opp)
+                        is_consecutive5 = (last5 - first5 + 1) == p5
+                        if not is_consecutive5:
+                            opp_score += w["broken3"]   # FIX #2
+
+        # FIX #5: Center bonus — khuyến khích AI đánh gần tâm bàn
+        # Với mỗi ô AI đang chiếm, cộng thêm trọng số vị trí tương ứng.
+        for r in range(size):
+            for c in range(size):
+                if grid[r][c] == self.player_id:
+                    score += self.center_weights[r][c]   # FIX #5
+
+        # FIX #2: Trả về hiệu điểm tấn công trừ điểm phòng thủ (nhân hệ số)
+        return score - opp_score * w["defense_mult"]

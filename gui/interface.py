@@ -28,7 +28,7 @@ PLAYER_X = 1
 PLAYER_O = 2
 
 AI_DEPTH      = 3
-AI_TIME_LIMIT = 1.0
+AI_TIME_LIMIT = 10
 
 # ─── Tiện ích ──
 
@@ -713,7 +713,7 @@ class GameScreen:
             cell = self._cell_at(event.pos)
             if cell:
                 row, col = cell
-                if self.board_obj.grid[row, col] == 0:
+                if self.board_obj.grid[row] [col] == 0:
                     placed = self._place_move(row, col)
                     if placed and not self.game_over and self.mode == "Ai":
                         self._trigger_ai()
@@ -792,7 +792,7 @@ class GameScreen:
         half   = self.CELL // 2
         for r in range(BOARD_SIZE):
             for c in range(BOARD_SIZE):
-                p = int(self.board_obj.grid[r, c])
+                p = int(self.board_obj.grid[r][ c])
                 if p in (PLAYER_X, PLAYER_O):
                     img = self.token_x if p == PLAYER_X else self.token_o
                     token_rect = img.get_rect(
@@ -823,13 +823,6 @@ class GameScreen:
         turn_rect = turn_img.get_rect(centerx=200, top=10)
         surface.blit(turn_img, turn_rect)
 
-        if self.mode == "Ai" and self.ai_thinking:
-            thinking_text = self._font_thinking.render(
-                "Ai đang suy nghĩ...", True, (212, 175, 55))
-            surface.blit(thinking_text,
-                         thinking_text.get_rect(
-                             centerx=350,
-                             top=turn_rect.bottom + 1))
 
         # ── Thông tin mode + algo ─
         mode_text = "VS MÁY" if self.mode == "Ai" else "VS NGƯỜI"
