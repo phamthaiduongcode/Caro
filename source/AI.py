@@ -12,21 +12,22 @@ class SearchTimeout(Exception):
 # ─────────────────────────────────────────────────────────────
 DEFAULT_WEIGHTS = {
     # Tấn công (AI)
-    "open3":        100_000,   # _XXX_  → gần thắng chắc, không có luật chặn 2 đầu
-    "half3":         10_000,   # XXX_   → mối đe dọa mạnh
-    "broken4":       80_000,   # XX_X hoặc X_XX → chỉ cần 1 nước là thắng
-    "open2":          1_000,   # _XX_
-    "half2":            100,   # XX_ hoặc _XX (1 đầu bị chặn)
-    "broken3":        3_000,   # X_XX_ hoặc _X_X_ (3 quân trong 5 ô)
+    "open3":        250_000,   # _XXX_  → Thắng chắc trong luật 4
+    "half3":        100_000,   # XXX_   → Buộc phải chặn ngay trong luật 4
+    "broken4":      100_000,   # XX_X   → Nguy hiểm tương đương half3
+    "open2":          5_000,   # _XX_
+    "half2":          1_000,   # XX_
+    "broken3":       10_000,   # X_X_
     "open1":             10,   # _X_
 
     # Hệ số phòng thủ: nhân vào điểm của đối thủ
     # > 1.0: thiên về phòng thủ; < 1.0: thiên về tấn công
     # Không có luật chặn 2 đầu → open3 của địch rất nguy hiểm → nên > 1.0
-    "defense_mult":    1.15,
+    "defense_mult":    1.20,
 
     # Bonus vị trí: cộng thêm cho quân gần tâm
-    "center_bonus":      40,   # điểm tối đa tại tâm, giảm dần theo khoảng cách
+    "center_bonus":      40,
+    "fork_bonus":   500_000,   # 2 open3 cùng lúc = gần như thắng chắc
 }
 
 
@@ -43,8 +44,15 @@ class CaroAI:
         self.depth     = depth
         self.weights   = weights if weights is not None else dict(DEFAULT_WEIGHTS)
 
+        # Điểm 3: Precompute Center Weights để tránh tính toán lặp lại
+        size = 9 # Mặc định size 9 cho Caro
+        ctr = size // 2
+        cb = self.weights.get("center_bonus", 40)
+        self.center_weights = [[max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) 
+                                for c in range(size)] for r in range(size)]
+
         self.nodes_visited     = 0
-        self.center            = 0
+        self.center            = ctr
         self.start_time        = 0
         self.time_limit        = 0
         self.transposition_table = {}
@@ -74,11 +82,22 @@ class CaroAI:
         # KHÔNG sort lại theo center — làm vậy sẽ xóa mất ordering tốt đó.
         # Center bonus đã được tính trong heuristic() nên không cần ưu tiên ở đây.
 
+        # BƯỚC 0: Kiểm tra nước thắng ngay (depth=1)
+        for move in legal_moves:
+            if board.fast_check_win(move[0], move[1], self.player_id):
+                return move, 1_000_000, 1, time.time() - self.start_time
+
+        # BƯỚC 0.5: Chặn đối thủ thắng ngay (Bắt buộc phải chặn trước khi nghĩ đến Fork)
+        for move in legal_moves:
+            if board.fast_check_win(move[0], move[1], self.opp_id):
+                return move, 950_000, 1, time.time() - self.start_time
+
         final_best_move  = legal_moves[0]
         final_best_score = -math.inf
 
         # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
-        search_range = [self.depth] if self.time_limit is None else range(1, self.depth + 1)
+        # Sửa: Chỉ dùng Depth chẵn để tránh Horizon Effect (2, 4)
+        search_range = [self.depth] if self.time_limit is None else range(2, self.depth + 1, 2)
 
         for current_depth in search_range:
             depth_best_move  = None
@@ -96,20 +115,17 @@ class CaroAI:
                         score = self.minimax(board, current_depth - 1, False)
                     elif mode == "alpha_beta":
                         score = self.alpha_beta(board, current_depth - 1, -math.inf, math.inf, False)
-                    # [MỚI] Thêm nhánh gọi PVS
-                    elif mode == "pvs":
-                        score = self.pvs(board, current_depth - 1, -math.inf, math.inf, False)
                     board.undo_move()
 
                     if score > depth_best_score:
                         depth_best_score = score
                         depth_best_move  = move
 
-                # Cập nhật khi hoàn thành trọn một độ sâu
+                # [QUAN TRỌNG] Chỉ cập nhật kết quả cuối cùng khi đã hoàn thành trọn vẹn độ sâu này
                 final_best_move  = depth_best_move
                 final_best_score = depth_best_score
 
-                # Move ordering: đưa nước tốt nhất lên đầu cho depth kế tiếp
+                # Move ordering: đưa nước tốt nhất của độ sâu vừa hoàn thành lên đầu cho lần lặp kế tiếp
                 if final_best_move in legal_moves:
                     legal_moves.remove(final_best_move)
                     legal_moves.insert(0, final_best_move)
@@ -215,93 +231,7 @@ class CaroAI:
         # [MỚI] Lưu best_move_found vào TT thay vì để None
         self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
         return best_score
-# ──────────────────────────────────────────────────────────
-    # Principal Variation Search (PVS) - Đẳng cấp Game Engine
-    # ──────────────────────────────────────────────────────────
-    def pvs(self, board, depth, alpha, beta, is_maximizing):
-        self.nodes_visited += 1
 
-        board_hash = board.get_hash()
-        alpha_orig, beta_orig = alpha, beta
-        tt_move = None
-
-        # 1. Kiểm tra Transposition Table
-        if board_hash in self.transposition_table:
-            tt_depth, tt_flag, tt_val, tt_move = self.transposition_table[board_hash]
-            if tt_depth >= depth:
-                if tt_flag == "EXACT": return tt_val
-                elif tt_flag == "LOWER": alpha = max(alpha, tt_val)
-                elif tt_flag == "UPPER": beta = min(beta, tt_val)
-                if alpha >= beta: return tt_val
-
-        if self.nodes_visited % 100 == 0 and self.time_limit is not None:
-            if time.time() - self.start_time > self.time_limit:
-                raise SearchTimeout()
-
-        result = board.check_win()
-        if result == self.player_id: return 1_000_000 + depth
-        if result == self.opp_id:    return -1_000_000 - depth
-        if result == -1:             return 0
-        if depth == 0:               return self.heuristic(board)
-
-        legal_moves = board.get_legal_moves()
-
-        # Đưa TT-Move lên đầu để PVS phát huy tối đa sức mạnh
-        if tt_move is not None and tt_move in legal_moves:
-            legal_moves.remove(tt_move)
-            legal_moves.insert(0, tt_move)
-
-        best_move_found = None
-
-        if is_maximizing:
-            best_score = -math.inf
-            for i, move in enumerate(legal_moves):
-                board.make_move(*move)
-                
-                if i == 0:
-                    # Nước đi đầu tiên (Principal Variation): Duyệt full window
-                    val = self.pvs(board, depth - 1, alpha, beta, False)
-                else:
-                    # Các nước sau: Duyệt Null Window (alpha, alpha + 1) để chứng minh nó tệ hơn
-                    val = self.pvs(board, depth - 1, alpha, alpha + 1, False)
-                    if alpha < val < beta:
-                        # Fail-high (phát hiện nước này tốt hơn dự kiến), duyệt lại full window
-                        val = self.pvs(board, depth - 1, val, beta, False)
-                        
-                board.undo_move()
-
-                if val > best_score:
-                    best_score = val
-                    best_move_found = move
-                alpha = max(alpha, best_score)
-                if beta <= alpha:
-                    break # Cut-off
-        else:
-            best_score = math.inf
-            for i, move in enumerate(legal_moves):
-                board.make_move(*move)
-                
-                if i == 0:
-                    val = self.pvs(board, depth - 1, alpha, beta, True)
-                else:
-                    # Null Window cho MIN player
-                    val = self.pvs(board, depth - 1, beta - 1, beta, True)
-                    if alpha < val < beta:
-                        val = self.pvs(board, depth - 1, alpha, val, True)
-                        
-                board.undo_move()
-
-                if val < best_score:
-                    best_score = val
-                    best_move_found = move
-                beta = min(beta, best_score)
-                if beta <= alpha:
-                    break # Cut-off
-
-        # Lưu lại TT
-        flag = "UPPER" if best_score <= alpha_orig else "LOWER" if best_score >= beta_orig else "EXACT"
-        self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
-        return best_score
     # ──────────────────────────────────────────────────────────
     # Minimax thuần túy
     # ──────────────────────────────────────────────────────────
@@ -340,37 +270,8 @@ class CaroAI:
     # Heuristic
     # ──────────────────────────────────────────────────────────
     def heuristic(self, board):
-        w = self.weights
-        ai_score   = self._score_for(board, self.player_id)
-        opp_score  = self._score_for(board, self.opp_id)
-        center_val = self._center_bonus(board)
-        return ai_score - w["defense_mult"] * opp_score + center_val
-
-    # ── Điểm vị trí trung tâm ──────────────────────────────
-    def _center_bonus(self, board):
-        """Cộng điểm cho mỗi quân của AI càng gần tâm càng cao."""
-        w      = self.weights
-        cb     = w["center_bonus"]
-        if cb == 0:
-            return 0
-        grid   = board.grid
-        size   = board.size
-        ctr    = self.center
-        bonus  = 0
-        player = self.player_id
-        for r in range(size):
-            for c in range(size):
-                if grid[r, c] == player:
-                    dist   = abs(r - ctr) + abs(c - ctr)
-                    bonus += max(0, cb - dist * 3)
-        return bonus
-
-    # ── Điểm pattern cho một người chơi ────────────────────
-    def _score_for(self, board, player):
         """
-        Tổng hợp điểm từ:
-          1. Consecutive patterns  (open3 / half3 / open2 / half2 / open1)
-          2. Broken patterns       (broken4 / broken3) trong cửa sổ 5 ô
+        Lượng giá O(1): Trả về ngay lập tức điểm số đã được tính sẵn bởi bàn cờ.
         """
         w        = self.weights
         score    = 0
