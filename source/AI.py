@@ -123,7 +123,6 @@ class CaroAI:
                         raise SearchTimeout()
 
                     board.make_move(*move)
-                    # Đoạn code cũ trong get_move
                     if mode == "minimax":
                         score = self.minimax(board, current_depth - 1, False, ply=1)
                     else:
