@@ -42,20 +42,29 @@ class CaroAI:
         self.player_id = player_id
         self.opp_id    = 3 - player_id
         self.depth     = depth
-        self.weights   = weights if weights is not None else dict(DEFAULT_WEIGHTS)
+        self.weights = weights if weights is not None else dict(DEFAULT_WEIGHTS)
 
-        # Điểm 3: Precompute Center Weights để tránh tính toán lặp lại
-        size = 9 # Mặc định size 9 cho Caro
-        ctr = size // 2
-        cb = self.weights.get("center_bonus", 40)
-        self.center_weights = [[max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) 
-                                for c in range(size)] for r in range(size)]
+        # ─── TỐI ƯU 3: center_weights được khởi tạo lazy theo board size ───
+        # Không hard-code size=9 nữa. Tính lại khi size thay đổi.
+        self._center_weights_size = None
+        self.center_weights = None
 
         self.nodes_visited     = 0
-        self.center            = ctr
+        self.center            = 0
         self.start_time        = 0
         self.time_limit        = 0
         self.transposition_table = {}
+
+    def _ensure_center_weights(self, size):
+        if self._center_weights_size == size:
+            return
+        ctr = size // 2
+        cb  = self.weights.get("center_bonus", 40)
+        self.center_weights = [
+            [max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) for c in range(size)]
+            for r in range(size)
+        ]
+        self._center_weights_size = size
 
     # ──────────────────────────────────────────────────────────
     # Giao diện chính
@@ -73,6 +82,7 @@ class CaroAI:
         self.player_id = board.current_player
         self.opp_id    = 3 - self.player_id
         self.center    = board.size // 2
+        self._ensure_center_weights(board.size)
 
         legal_moves = board.get_legal_moves()
         if not legal_moves:
@@ -142,6 +152,12 @@ class CaroAI:
         duration = time.time() - self.start_time
         return final_best_move, final_best_score, self.nodes_visited, duration
 
+    def _check_timeout(self):
+        """Gộp logic timeout vào một chỗ, tránh lặp code."""
+        if self.nodes_visited % 200 == 0:   # Tăng từ 100 → 200 để giảm overhead time.time()
+            if self.time_limit is not None and time.time() - self.start_time > self.time_limit:
+                raise SearchTimeout()
+
     # ──────────────────────────────────────────────────────────
     # Alpha-Beta
     # ──────────────────────────────────────────────────────────
@@ -170,11 +186,7 @@ class CaroAI:
                 if alpha >= beta:
                     return tt_val
 
-        # Kiểm tra timeout (giữ nguyên của bạn)
-        if self.nodes_visited % 100 == 0:
-            if self.time_limit is not None and \
-               time.time() - self.start_time > self.time_limit:
-                raise SearchTimeout()
+        self._check_timeout()
 
         result = board.check_win()
         if result == self.player_id:  return  1_000_000 + depth
@@ -253,9 +265,7 @@ class CaroAI:
                 elif tt_flag == "UPPER": beta = min(beta, tt_val)
                 if alpha >= beta: return tt_val
 
-        if self.nodes_visited % 100 == 0 and self.time_limit is not None:
-            if time.time() - self.start_time > self.time_limit:
-                raise SearchTimeout()
+        self._check_timeout()
 
         result = board.check_win()
         if result == self.player_id: return 1_000_000 + depth
@@ -327,10 +337,7 @@ class CaroAI:
     def minimax(self, board, depth, is_maximizing):
         self.nodes_visited += 1
 
-        if self.nodes_visited % 100 == 0:
-            if self.time_limit is not None and \
-               time.time() - self.start_time > self.time_limit:
-                raise SearchTimeout()
+        self._check_timeout()
 
         result = board.check_win()
         if result == self.player_id:  return  1_000_000 + depth
@@ -362,89 +369,8 @@ class CaroAI:
         """
         Lượng giá O(1): Trả về ngay lập tức điểm số đã được tính sẵn bởi bàn cờ.
         """
-        w        = self.weights
-        score    = 0
-        size     = board.size
-        grid     = board.grid
-        win_cond = board.win_condition   # = 4
-        opp      = 3 - player
-
-        for r in range(size):
-            for c in range(size):
-                for dr, dc in board.DIRECTIONS:
-
-                    # ── 1. Consecutive (cửa sổ win_cond ô) ──
-                    # Chỉ tính khi các quân của player liền nhau, không có gap.
-                    # Nếu có gap → là broken pattern, đã được tính ở section 2.
-                    # Cách phát hiện gap: span (last_idx - first_idx + 1) phải == p_count.
-                    end_r = r + (win_cond - 1) * dr
-                    end_c = c + (win_cond - 1) * dc
-                    if 0 <= end_r < size and 0 <= end_c < size:
-                        p_count  = 0
-                        blocked  = False
-                        first_idx = -1
-                        last_idx  = -1
-
-                        for i in range(win_cond):
-                            v = grid[r + i*dr, c + i*dc]
-                            if v == player:
-                                p_count += 1
-                                if first_idx == -1:
-                                    first_idx = i
-                                last_idx = i
-                            elif v == opp:
-                                blocked = True
-                                break
-
-                        # Bỏ qua nếu bị chặn, rỗng, hoặc có gap giữa các quân
-                        is_consecutive = (
-                            not blocked
-                            and p_count > 0
-                            and (last_idx - first_idx + 1) == p_count
-                        )
-
-                        if is_consecutive:
-                            open_ends = 0
-                            pr, pc = r - dr, c - dc
-                            if 0 <= pr < size and 0 <= pc < size and grid[pr, pc] == 0:
-                                open_ends += 1
-                            nr, nc = end_r + dr, end_c + dc
-                            if 0 <= nr < size and 0 <= nc < size and grid[nr, nc] == 0:
-                                open_ends += 1
-
-                            if p_count == 3:
-                                if open_ends == 2:
-                                    score += w["open3"]
-                                elif open_ends == 1:
-                                    score += w["half3"]
-                            elif p_count == 2:
-                                if open_ends == 2:
-                                    score += w["open2"]
-                                elif open_ends == 1:
-                                    score += w["half2"]
-                            elif p_count == 1:
-                                if open_ends == 2:
-                                    score += w["open1"]
-
-                    # ── 2. Broken patterns (cửa sổ 5 ô) ──
-                    # Chỉ tính khi cửa sổ 5 ô nằm trong bàn
-                    end5_r = r + 4 * dr
-                    end5_c = c + 4 * dc
-                    if not (0 <= end5_r < size and 0 <= end5_c < size):
-                        continue
-
-                    w5 = [grid[r + i*dr, c + i*dc] for i in range(5)]
-                    if opp in w5:
-                        continue   # Bị địch chặn trong cửa sổ → không tính
-
-                    p5 = w5.count(player)
-                    z5 = w5.count(0)
-
-                    # broken4: 4 quân + 1 trống trong 5 ô (XX_X hoặc X_XX)
-                    if p5 == 4 and z5 == 1:
-                        score += w["broken4"]
-                    # broken3: 3 quân + 2 trống trong 5 ô
-                    elif p5 == 3 and z5 == 2:
-                        score += w["broken3"]
-
-        return score
+        # current_score được tính từ góc nhìn của Player 2 (O).
+        # Nếu AI là Player 1 (X), ta cần đảo ngược dấu.
+        if self.player_id == 1:
+            return -board.current_score
+        return board.current_score
