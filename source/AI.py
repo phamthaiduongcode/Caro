@@ -1,303 +1,382 @@
-import random
+import math
+import time
 
-class Board:
-    DIRECTIONS = [(0, 1), (1, 0), (1, 1), (1, -1)]
-    _NEIGHBOR_OFFSETS = [(dr, dc) for dr in range(-2, 3) for dc in range(-2, 3) if dr or dc]
+class SearchTimeout(Exception):
+    """Ngoại lệ tùy chỉnh để dừng tìm kiếm khi hết thời gian."""
+    pass
 
-    # Trọng số được tinh chỉnh để phản ánh Open vs Half patterns
-    # Open3 = 250k (chia 2 vì 1 thế Open3 tạo ra 2 cửa sổ trượt có điểm)
-    # Half3 = 100k
-    WIN_SCORE = 1_000_000
-    OPEN3_WIN_VAL = 125_000 
-    HALF3_WIN_VAL = 100_000
-    OPEN2_WIN_VAL = 2_500
-    HALF2_WIN_VAL = 1_000
 
-    def __init__(self, size=9, win_condition=4):
-        if size < 9:
-            raise ValueError("Board size must be at least 9x9.")
-        self.size = size
-        self.win_condition = win_condition
-        self.grid = [0] * (size * size) # Flat array
-        self.current_player = 1
-        self.history = []
-        self.current_score = 0
+# ─────────────────────────────────────────────────────────────
+# Trọng số mặc định (baseline đã được căn chỉnh tay)
+# Đây là điểm khởi đầu cho GA training.
+# ─────────────────────────────────────────────────────────────
+DEFAULT_WEIGHTS = {
+    # Tấn công (AI)
+    "open3":        250_000,   # _XXX_  → Thắng chắc trong luật 4
+    "half3":        100_000,   # XXX_   → Buộc phải chặn ngay trong luật 4
+    "broken4":      100_000,   # XX_X   → Nguy hiểm tương đương half3
+    "open2":          5_000,   # _XX_
+    "half2":          1_000,   # XX_
+    "broken3":       10_000,   # X_X_
+    "open1":             10,   # _X_
 
-        self.zobrist_table = [[[random.getrandbits(64) for _ in range(3)]
-                               for _ in range(size)] for _ in range(size)]
-        self.zobrist_side = random.getrandbits(64)
-        self.current_hash = 0
-        for r in range(size):
-            for c in range(size):
-                self.current_hash ^= self.zobrist_table[r][c][0]
+    # Hệ số phòng thủ: nhân vào điểm của đối thủ
+    # > 1.0: thiên về phòng thủ; < 1.0: thiên về tấn công
+    # Không có luật chặn 2 đầu → open3 của địch rất nguy hiểm → nên > 1.0
+    "defense_mult":    1.20,
 
-        self._cand_refs = [0] * (size * size)
-        self._candidates: set = set()
+    # Bonus vị trí: cộng thêm cho quân gần tâm
+    "center_bonus":      40,
+    "fork_bonus":   500_000,   # 2 open3 cùng lúc = gần như thắng chắc
+}
 
-    def _add_neighbors(self, r, c):
-        size = self.size
-        grid = self.grid
-        refs = self._cand_refs
-        cands = self._candidates
-        for dr, dc in self._NEIGHBOR_OFFSETS:
-            nr = r + dr; nc = c + dc
-            if 0 <= nr < size and 0 <= nc < size:
-                idx = nr * size + nc
-                if grid[idx] == 0:
-                    refs[idx] += 1
-                    cands.add((nr, nc))
 
-    def _remove_neighbors(self, r, c):
-        size = self.size
-        refs = self._cand_refs
-        cands = self._candidates
-        for dr, dc in self._NEIGHBOR_OFFSETS:
-            nr = r + dr; nc = c + dc
-            if 0 <= nr < size and 0 <= nc < size:
-                idx = nr * size + nc
-                v = refs[idx]
-                if v > 0:
-                    v -= 1
-                    refs[idx] = v
-                    if v == 0:
-                        cands.discard((nr, nc))
+class CaroAI:
+    def __init__(self, player_id, depth=3, weights=None):
+        """
+        Args:
+            player_id: 1 (X) hoặc 2 (O)
+            depth:     độ sâu tìm kiếm tối đa
+            weights:   dict trọng số (dùng DEFAULT_WEIGHTS nếu None)
+        """
+        self.player_id = player_id
+        self.opp_id    = 3 - player_id
+        self.depth     = depth
+        self.weights = weights if weights is not None else dict(DEFAULT_WEIGHTS)
 
-    def is_valid(self, row, col) -> bool:
-        return 0 <= row < self.size and 0 <= col < self.size and \
-               self.grid[row * self.size + col] == 0
+        # ─── TỐI ƯU 3: center_weights được khởi tạo lazy theo board size ───
+        # Không hard-code size=9 nữa. Tính lại khi size thay đổi.
+        self._center_weights_size = None
+        self.center_weights = None
 
-    def get_hash(self):
-        return self.current_hash
+        self.nodes_visited     = 0
+        self.center            = 0
+        self.start_time        = 0
+        self.time_limit        = 0
+        self.transposition_table = {}
 
-    def _get_window_score(self, p_cnt, o_cnt, is_blocked_start, is_blocked_end, is_ai):
-        """Hàm lượng giá cửa sổ thông minh: Phân biệt Open/Half/Blocked."""
-        if p_cnt > 0 and o_cnt > 0: return 0
+    def _ensure_center_weights(self, size):
+        if self._center_weights_size == size:
+            return
+        ctr = size // 2
+        cb  = self.weights.get("center_bonus", 40)
+        self.center_weights = [
+            [max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) for c in range(size)]
+            for r in range(size)
+        ]
+        self._center_weights_size = size
+
+    # ──────────────────────────────────────────────────────────
+    # Giao diện chính
+    # ──────────────────────────────────────────────────────────
+    def get_move(self, board, mode="pvs", time_limit=10.0):
+        """
+        Trả về: (best_move, best_score, nodes_visited, time_taken)
+        time_limit=None → bỏ qua iterative deepening, chạy thẳng depth.
+        """
+        self.nodes_visited       = 0
+        self.start_time          = time.time()
+        self.time_limit          = time_limit
+        self.transposition_table = {}
+
+        self.player_id = board.current_player
+        self.opp_id    = 3 - self.player_id
+        self.center    = board.size // 2
+        self._ensure_center_weights(board.size)
+
+        legal_moves = board.get_legal_moves()
+        if not legal_moves:
+            return None, 0, 0, 0
+
+        # get_legal_moves() đã sort theo priority (nước thắng=3, nước chặn=2, thường=0).
+        # KHÔNG sort lại theo center — làm vậy sẽ xóa mất ordering tốt đó.
+        # Center bonus đã được tính trong heuristic() nên không cần ưu tiên ở đây.
+
+        # BƯỚC 0: Kiểm tra nước thắng ngay (depth=1)
+        for move in legal_moves:
+            if board.fast_check_win(move[0], move[1], self.player_id):
+                return move, 1_000_000, 1, time.time() - self.start_time # ply=0 win
+
+        # BƯỚC 0.5: Chặn đối thủ thắng ngay (Bắt buộc phải chặn trước khi nghĩ đến Fork)
+        for move in legal_moves:
+            if board.fast_check_win(move[0], move[1], self.opp_id):
+                return move, 950_000, 1, time.time() - self.start_time
+
+        final_best_move  = legal_moves[0]
+        final_best_score = -math.inf
+
+        root_beta = math.inf
+
+        # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
+        # Sửa: Chỉ dùng Depth chẵn để tránh Horizon Effect (2, 4)
+        search_range = [self.depth] if self.time_limit is None else range(2, self.depth + 1, 2)
+
+        for current_depth in search_range:
+            depth_best_move  = None
+            depth_best_score = -math.inf
+            alpha = -math.inf
+
+            try:
+                for move in legal_moves:
+                    if self.time_limit is not None and \
+                       time.time() - self.start_time > self.time_limit:
+                        raise SearchTimeout()
+
+                    board.make_move(*move)
+                    # Đoạn code cũ trong get_move
+                    if mode == "minimax":
+                        score = self.minimax(board, current_depth - 1, False, ply=1)
+                    elif mode == "alpha_beta":
+                        score = self.alpha_beta(board, current_depth - 1, alpha, root_beta, False, ply=1)
+                    # [MỚI] Thêm nhánh gọi PVS
+                    elif mode == "pvs":
+                        score = self.pvs(board, current_depth - 1, alpha, root_beta, False, ply=1)
+                    board.undo_move()
+
+                    if score > depth_best_score:
+                        depth_best_score = score
+                        depth_best_move  = move
+                    
+                    # Cập nhật alpha để các nước đi sau ở Root được cắt tỉa
+                    alpha = max(alpha, depth_best_score)
+
+                # [QUAN TRỌNG] Chỉ cập nhật kết quả cuối cùng khi đã hoàn thành trọn vẹn độ sâu này
+                final_best_move  = depth_best_move
+                final_best_score = depth_best_score
+
+                # Move ordering: đưa nước tốt nhất của độ sâu vừa hoàn thành lên đầu cho lần lặp kế tiếp
+                if final_best_move in legal_moves:
+                    legal_moves.remove(final_best_move)
+                    legal_moves.insert(0, final_best_move)
+
+                if final_best_score >= 1_000_000:
+                    break  # Tìm thấy nước thắng tuyệt đối
+
+            except SearchTimeout:
+                break
+
+        duration = time.time() - self.start_time
+        return final_best_move, final_best_score, self.nodes_visited, duration
+
+    def _check_timeout(self):
+        """Gộp logic timeout vào một chỗ, tránh lặp code."""
+        if self.nodes_visited % 200 == 0:   # Tăng từ 100 → 200 để giảm overhead time.time()
+            if self.time_limit is not None and time.time() - self.start_time > self.time_limit:
+                raise SearchTimeout()
+
+    # ──────────────────────────────────────────────────────────
+    # Alpha-Beta
+    # ──────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
+    # Alpha-Beta (Đã tối ưu: Move Ordering với TT-Move)
+    # ──────────────────────────────────────────────────────────
+    def alpha_beta(self, board, depth, alpha, beta, is_maximizing, ply=0):
+        self.nodes_visited += 1
+
+        board_hash              = board.get_hash()
+        alpha_orig, beta_orig   = alpha, beta
         
-        count = p_cnt if is_ai else o_cnt
-        if count == 0: return 0
-        if count >= self.win_condition: return self.WIN_SCORE
+        # [MỚI] Biến để hứng nước đi tốt nhất từ TT
+        tt_move = None 
 
-        # Nếu bị chặn cả 2 đầu -> Cửa sổ này vô dụng (trừ khi đã thắng)
-        if is_blocked_start and is_blocked_end: return 0
+        if board_hash in self.transposition_table:
+            # [MỚI] Lấy tt_move ra từ index thứ 3 của tuple
+            tt_depth, tt_flag, tt_val, tt_move = self.transposition_table[board_hash]
+            if tt_depth >= depth:
+                if tt_flag == "EXACT":
+                    return tt_val
+                elif tt_flag == "LOWER":
+                    alpha = max(alpha, tt_val)
+                elif tt_flag == "UPPER":
+                    beta  = min(beta, tt_val)
+                if alpha >= beta:
+                    return tt_val
 
-        # Phân loại dựa trên số đầu trống
-        is_open = not is_blocked_start and not is_blocked_end
-        
-        if count == 3:
-            return self.OPEN3_WIN_VAL if is_open else self.HALF3_WIN_VAL
-        if count == 2:
-            return self.OPEN2_WIN_VAL if is_open else self.HALF2_WIN_VAL
-        return 10 # count == 1
+        self._check_timeout()
 
-    def _compute_score_delta(self, row, col, player) -> int:
-        opp  = 3 - player
-        delta = 0
-        wc    = self.win_condition
-        size  = self.size
-        grid  = self.grid
+        result = board.check_win()
+        if result == self.player_id:  return  1_000_000 - ply
+        if result == self.opp_id:     return -1_000_000 + ply
+        if result == -1:              return  0
+        if depth == 0:                return  self.heuristic(board)
 
-        for dr, dc in self.DIRECTIONS:
-            # "Phóng tia": Lấy dữ liệu 1 đường thẳng duy nhất chứa ô vừa đánh
-            # wc=4 -> lấy 4 ô mỗi phía để bao quát mọi cửa sổ 4 ô chứa điểm này
-            line = []
-            for i in range(-wc, wc + 1):
-                r, c = row + i*dr, col + i*dc
-                if 0 <= r < size and 0 <= c < size:
-                    line.append(grid[r*size + c])
+        legal_moves = board.get_legal_moves()
+
+        # ────────────────────────────────────────────────────
+        # [MỚI] TT-MOVE ORDERING
+        # Nếu TT có lưu nước đi tốt nhất cho trạng thái này,
+        # đẩy nó lên đầu danh sách để Alpha-Beta cắt nhánh sớm nhất!
+        # ────────────────────────────────────────────────────
+        if tt_move is not None and tt_move in legal_moves:
+            legal_moves.remove(tt_move)
+            legal_moves.insert(0, tt_move)
+
+        # [MỚI] Biến theo dõi nước đi tốt nhất trong nhánh này để lưu vào TT
+        best_move_found = None 
+
+        if is_maximizing:
+            best_score = -math.inf
+            for move in legal_moves:
+                board.make_move(*move)
+                val = self.alpha_beta(board, depth - 1, alpha, beta, False, ply + 1)
+                board.undo_move()
+                
+                # [MỚI] Cập nhật best_move_found
+                if val > best_score:
+                    best_score = val
+                    best_move_found = move 
+                    
+                alpha = max(alpha, best_score)
+                if beta <= alpha:
+                    break
+        else:
+            best_score = math.inf
+            for move in legal_moves:
+                board.make_move(*move)
+                val = self.alpha_beta(board, depth - 1, alpha, beta, True, ply + 1)
+                board.undo_move()
+                
+                # [MỚI] Cập nhật best_move_found
+                if val < best_score:
+                    best_score = val
+                    best_move_found = move
+                    
+                beta = min(beta, best_score)
+                if beta <= alpha:
+                    break
+
+        flag = ("UPPER" if best_score <= alpha_orig
+                else "LOWER" if best_score >= beta_orig
+                else "EXACT")
+                
+        # [MỚI] Lưu best_move_found vào TT thay vì để None
+        self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
+        return best_score
+# ──────────────────────────────────────────────────────────
+    # Principal Variation Search (PVS) - Đẳng cấp Game Engine
+    # ──────────────────────────────────────────────────────────
+    def pvs(self, board, depth, alpha, beta, is_maximizing, ply=0):
+        self.nodes_visited += 1
+
+        board_hash = board.get_hash()
+        alpha_orig, beta_orig = alpha, beta
+        tt_move = None
+
+        # 1. Kiểm tra Transposition Table
+        if board_hash in self.transposition_table:
+            tt_depth, tt_flag, tt_val, tt_move = self.transposition_table[board_hash]
+            if tt_depth >= depth:
+                if tt_flag == "EXACT": return tt_val
+                elif tt_flag == "LOWER": alpha = max(alpha, tt_val)
+                elif tt_flag == "UPPER": beta = min(beta, tt_val)
+                if alpha >= beta: return tt_val
+
+        self._check_timeout()
+
+        result = board.check_win()
+        if result == self.player_id: return 1_000_000 - ply
+        if result == self.opp_id:    return -1_000_000 + ply
+        if result == -1:             return 0
+        if depth == 0:               return self.heuristic(board)
+
+        legal_moves = board.get_legal_moves()
+
+        # Đưa TT-Move lên đầu để PVS phát huy tối đa sức mạnh
+        if tt_move is not None and tt_move in legal_moves:
+            legal_moves.remove(tt_move)
+            legal_moves.insert(0, tt_move)
+
+        best_move_found = None
+
+        if is_maximizing:
+            best_score = -math.inf
+            for i, move in enumerate(legal_moves):
+                board.make_move(*move)
+                
+                if i == 0:
+                    # Nước đi đầu tiên (Principal Variation): Duyệt full window
+                    val = self.pvs(board, depth - 1, alpha, beta, False, ply + 1)
                 else:
-                    line.append(-1) # Biên bàn cờ tính là chặn
+                    # Các nước sau: Duyệt Null Window (alpha, alpha + 1) để chứng minh nó tệ hơn
+                    val = self.pvs(board, depth - 1, alpha, alpha + 1, False, ply + 1)
+                    if alpha < val < beta:
+                        # Fail-high (phát hiện nước này tốt hơn dự kiến), duyệt lại full window
+                        val = self.pvs(board, depth - 1, val, beta, False, ply + 1)
+                        
+                board.undo_move()
 
-            # Quét các cửa sổ kích thước wc đi qua điểm trung tâm (index wc trong line)
-            for start in range(1, wc + 1):
-                end = start + wc
-                window = line[start:end]
+                if val > best_score:
+                    best_score = val
+                    best_move_found = move
+                alpha = max(alpha, best_score)
+                if beta <= alpha:
+                    break # Cut-off
+        else:
+            best_score = math.inf
+            for i, move in enumerate(legal_moves):
+                board.make_move(*move)
                 
-                p1_cnt = window.count(1)
-                p2_cnt = window.count(2)
+                if i == 0:
+                    val = self.pvs(board, depth - 1, alpha, beta, True, ply + 1)
+                else:
+                    # Null Window cho MIN player
+                    val = self.pvs(board, depth - 1, beta - 1, beta, True, ply + 1)
+                    if alpha < val < beta:
+                        val = self.pvs(board, depth - 1, alpha, val, True, ply + 1)
+                        
+                board.undo_move()
 
-                # Nếu cửa sổ hỗn tạp (có cả X và O) -> 0 điểm, không cần tính delta
-                if p1_cnt > 0 and p2_cnt > 0: continue
-                
-                for p_idx in (1, 2):
-                    if (p_idx == 1 and p2_cnt > 0) or (p_idx == 2 and p1_cnt > 0): continue
-                    
-                    other = 3 - p_idx
-                    is_ai = (p_idx == 2)
-                    cnt = p1_cnt if p_idx == 1 else p2_cnt
-                    
-                    # Check chặn bằng dữ liệu từ 'line' đã fetch
-                    b_s = (line[start-1] == other or line[start-1] == -1)
-                    b_e = (line[end] == other or line[end] == -1)
+                if val < best_score:
+                    best_score = val
+                    best_move_found = move
+                beta = min(beta, best_score)
+                if beta <= alpha:
+                    break # Cut-off
 
-                    if player == p_idx: # Tăng điểm cho quân mình
-                        s_before = self._get_window_score(cnt, 0, b_s, b_e, is_ai)
-                        s_after  = self._get_window_score(cnt + 1, 0, b_s, b_e, is_ai)
-                    else: # Chặn điểm của đối thủ (đối thủ đang có quân trong window này)
-                        if cnt == 0: continue
-                        s_before = self._get_window_score(cnt, 0, b_s, b_e, is_ai)
-                        s_after  = 0
-                    
-                    wd = s_after - s_before
-                    delta += wd if is_ai else -wd
+        # Lưu lại TT
+        flag = "UPPER" if best_score <= alpha_orig else "LOWER" if best_score >= beta_orig else "EXACT"
+        self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
+        return best_score
+    # ──────────────────────────────────────────────────────────
+    # Minimax thuần túy
+    # ──────────────────────────────────────────────────────────
+    def minimax(self, board, depth, is_maximizing, ply=0):
+        self.nodes_visited += 1
 
-        ctr = size >> 1
-        center_val = max(0, 40 - (abs(row-ctr) + abs(col-ctr)) * 3)
-        delta += center_val if player == 2 else -center_val
-        return delta
+        self._check_timeout()
 
-    def make_move(self, row, col) -> bool:
-        if not self.is_valid(row, col):
-            return False
+        result = board.check_win()
+        if result == self.player_id:  return  1_000_000 - ply
+        if result == self.opp_id:     return -1_000_000 + ply
+        if result == -1:              return  0
+        if depth == 0:                return  self.heuristic(board)
 
-        delta = self._compute_score_delta(row, col, self.current_player)
-        idx   = row * self.size + col
-        zt    = self.zobrist_table
-        self.current_hash ^= zt[row][col][0]
-        self.grid[idx]     = self.current_player
-        self.current_hash ^= zt[row][col][self.current_player]
-        self.current_hash ^= self.zobrist_side
-        self.current_score += delta
-        self.history.append((row, col, delta))
-        self.current_player = 3 - self.current_player
-        self._cand_refs[idx] = 0
-        self._candidates.discard((row, col))
-        self._add_neighbors(row, col)
-        return True
+        legal_moves = board.get_legal_moves()
 
-    def undo_move(self) -> bool:
-        if not self.history:
-            return False
+        if is_maximizing:
+            best = -math.inf
+            for move in legal_moves:
+                board.make_move(*move)
+                best = max(best, self.minimax(board, depth - 1, False, ply + 1))
+                board.undo_move()
+            return best
+        else:
+            best = math.inf
+            for move in legal_moves:
+                board.make_move(*move)
+                best = min(best, self.minimax(board, depth - 1, True, ply + 1))
+                board.undo_move()
+            return best
 
-        row, col, delta = self.history.pop()
-        idx  = row * self.size + col
-        zt   = self.zobrist_table
-        self.current_hash ^= zt[row][col][self.grid[idx]]
-        self.grid[idx]     = 0
-        self.current_hash ^= zt[row][col][0]
-        self.current_hash ^= self.zobrist_side
-        self.current_score -= delta
-        self.current_player = 3 - self.current_player
-        self._remove_neighbors(row, col)
-        size = self.size
-        grid = self.grid
-        ref  = sum(1 for dr, dc in self._NEIGHBOR_OFFSETS
-                   if 0 <= row+dr < size and 0 <= col+dc < size
-                   and grid[(row+dr)*size + col+dc] != 0)
-        if ref > 0:
-            self._cand_refs[idx] = ref
-            self._candidates.add((row, col))
-        return True
-
-    def check_win(self) -> int:
-        if not self.history:
-            return 0
-        last_r, last_c, _ = self.history[-1]
-        last_player = self.grid[last_r * self.size + last_c]
-        if self._check_at(last_r, last_c):
-            return last_player
-        if len(self.history) == self.size * self.size:
-            return -1
-        return 0
-
-    def _check_at(self, r, c) -> bool:
-        player = self.grid[r * self.size + c]
-        size   = self.size
-        grid   = self.grid
-        wc     = self.win_condition
-        for dr, dc in self.DIRECTIONS:
-            cnt = 1
-            for d in (1, -1):
-                nr = r + dr*d; nc = c + dc*d
-                while 0 <= nr < size and 0 <= nc < size and grid[nr*size+nc] == player:
-                    cnt += 1
-                    if cnt >= wc: return True
-                    nr += dr*d; nc += dc*d
-        return False
-
-    def fast_check_win(self, r, c, player) -> bool:
-        size = self.size
-        grid = self.grid
-        wc   = self.win_condition
-        for dr, dc in self.DIRECTIONS:
-            cnt = 1
-            for d in (1, -1):
-                nr = r + dr*d; nc = c + dc*d
-                while 0 <= nr < size and 0 <= nc < size and grid[nr*size+nc] == player:
-                    cnt += 1; nr += dr*d; nc += dc*d
-            if cnt >= wc: return True
-        return False
-
-    MAX_MOVES = 20
-
-    def get_legal_moves(self) -> list:
-        if not self.history:
-            return [(self.size // 2, self.size // 2)]
-        if not self._candidates:
-            return []
-
-        cur  = self.current_player
-        opp  = 3 - cur
-        ctr  = self.size >> 1
-        size = self.size
-
-        wins = []; blocks = []; normal = []
-        for pos in self._candidates:
-            r, c = pos
-            if self.fast_check_win(r, c, cur):
-                wins.append(pos)
-            elif self.fast_check_win(r, c, opp):
-                blocks.append(pos)
-            else:
-                normal.append(pos)
-
-        if wins:
-            return wins
-
-        remaining = self.MAX_MOVES - len(blocks)
-        if remaining > 0 and normal:
-            normal.sort(key=lambda p: -(size - abs(p[0]-ctr) - abs(p[1]-ctr)))
-            normal = normal[:remaining]
-
-        return blocks + normal
-
-    def evaluate_position(self, r, c, player):
-        score = 0; opp = 3 - player
-        grid = self.grid; size = self.size; wc = self.win_condition
-        for dr, dc in self.DIRECTIONS:
-            for offset in range(wc):
-                sr, sc = r - offset*dr, c - offset*dc
-                er, ec = sr+(wc-1)*dr, sc+(wc-1)*dc
-                if not (0<=sr<size and 0<=sc<size and 0<=er<size and 0<=ec<size): continue
-                p_cnt = o_cnt = 0
-                for i in range(wc):
-                    cell = grid[(sr+i*dr)*size + sc+i*dc]
-                    if cell == player: p_cnt += 1
-                    elif cell == opp:  o_cnt += 1
-                if p_cnt > 0 and o_cnt == 0:
-                    score += (1000000 if p_cnt==wc else 10000 if p_cnt==wc-1 else 100 if p_cnt==wc-2 else 10)
-                elif o_cnt > 0 and p_cnt == 0:
-                    score -= (1200000 if o_cnt==wc else 12000 if o_cnt==wc-1 else 120 if o_cnt==wc-2 else 12)
-        ctr = size >> 1
-        score += max(0, 40 - (abs(r-ctr)+abs(c-ctr))*3)
-        return score
-
-    def copy(self):
-        nb = Board(self.size, self.win_condition)
-        nb.grid = self.grid[:]
-        nb.current_player = self.current_player
-        nb.history = self.history.copy()
-        nb.current_score = self.current_score
-        nb.zobrist_table = self.zobrist_table
-        nb.zobrist_side = self.zobrist_side
-        nb.current_hash = self.current_hash
-        nb._candidates = set(self._candidates)
-        nb._cand_refs = self._cand_refs[:]
-        return nb
-
-    def display(self):
-        symbols = {0:'.', 1:'X', 2:'O'}
-        size = self.size
-        print("  " + " ".join(str(i) for i in range(size)))
-        for r in range(size):
-            print(f"{r} " + " ".join(symbols[self.grid[r*size+c]] for c in range(size)))
-        print(f"Lượt kế tiếp: {symbols[self.current_player]}")
+    # ──────────────────────────────────────────────────────────
+    # Heuristic
+    # ──────────────────────────────────────────────────────────
+    def heuristic(self, board):
+        """
+        Lượng giá O(1): Trả về ngay lập tức điểm số đã được tính sẵn bởi bàn cờ.
+        """
+        # current_score được tính từ góc nhìn của Player 2 (O).
+        # Nếu AI là Player 1 (X), ta cần đảo ngược dấu.
+        if self.player_id == 1:
+            return -board.current_score
+        return board.current_score
