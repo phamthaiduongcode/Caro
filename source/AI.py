@@ -52,7 +52,7 @@ class CaroAI:
     # ──────────────────────────────────────────────────────────
     # Giao diện chính
     # ──────────────────────────────────────────────────────────
-    def get_move(self, board, mode="alpha_beta", time_limit=8.0):
+    def get_move(self, board, mode, time_limit=8.0):
         """
         Trả về: (best_move, best_score, nodes_visited, time_taken)
         time_limit=None → bỏ qua iterative deepening, chạy thẳng depth.
@@ -91,7 +91,7 @@ class CaroAI:
                         raise SearchTimeout()
 
                     board.make_move(*move)
-                    # Đoạn code cũ trong get_move
+                    
                     if mode == "minimax":
                         score = self.minimax(board, current_depth - 1, False)
                     elif mode == "alpha_beta":
@@ -127,7 +127,7 @@ class CaroAI:
     # Alpha-Beta
     # ──────────────────────────────────────────────────────────
     # ──────────────────────────────────────────────────────────
-    # Alpha-Beta (Đã tối ưu: Move Ordering với TT-Move)
+    # Alpha-Beta 
     # ──────────────────────────────────────────────────────────
     def alpha_beta(self, board, depth, alpha, beta, is_maximizing):
         self.nodes_visited += 1
@@ -151,7 +151,7 @@ class CaroAI:
                 if alpha >= beta:
                     return tt_val
 
-        # Kiểm tra timeout (giữ nguyên của bạn)
+        # Kiểm tra timeout 
         if self.nodes_visited % 100 == 0:
             if self.time_limit is not None and \
                time.time() - self.start_time > self.time_limit:
