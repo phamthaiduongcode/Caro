@@ -42,25 +42,34 @@ class CaroAI:
         self.player_id = player_id
         self.opp_id    = 3 - player_id
         self.depth     = depth
-        self.weights   = weights if weights is not None else dict(DEFAULT_WEIGHTS)
+        self.weights = weights if weights is not None else dict(DEFAULT_WEIGHTS)
 
-        # Điểm 3: Precompute Center Weights để tránh tính toán lặp lại
-        size = 9 # Mặc định size 9 cho Caro
-        ctr = size // 2
-        cb = self.weights.get("center_bonus", 40)
-        self.center_weights = [[max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) 
-                                for c in range(size)] for r in range(size)]
+        # ─── TỐI ƯU 3: center_weights được khởi tạo lazy theo board size ───
+        # Không hard-code size=9 nữa. Tính lại khi size thay đổi.
+        self._center_weights_size = None
+        self.center_weights = None
 
         self.nodes_visited     = 0
-        self.center            = ctr
+        self.center            = 0
         self.start_time        = 0
         self.time_limit        = 0
         self.transposition_table = {}
 
+    def _ensure_center_weights(self, size):
+        if self._center_weights_size == size:
+            return
+        ctr = size // 2
+        cb  = self.weights.get("center_bonus", 40)
+        self.center_weights = [
+            [max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) for c in range(size)]
+            for r in range(size)
+        ]
+        self._center_weights_size = size
+
     # ──────────────────────────────────────────────────────────
     # Giao diện chính
     # ──────────────────────────────────────────────────────────
-    def get_move(self, board, mode="pvs", time_limit=10.0):
+    def get_move(self, board, mode="alphabeta", time_limit=10.0):
         """
         Trả về: (best_move, best_score, nodes_visited, time_taken)
         time_limit=None → bỏ qua iterative deepening, chạy thẳng depth.
@@ -73,6 +82,7 @@ class CaroAI:
         self.player_id = board.current_player
         self.opp_id    = 3 - self.player_id
         self.center    = board.size // 2
+        self._ensure_center_weights(board.size)
 
         legal_moves = board.get_legal_moves()
         if not legal_moves:
@@ -85,7 +95,7 @@ class CaroAI:
         # BƯỚC 0: Kiểm tra nước thắng ngay (depth=1)
         for move in legal_moves:
             if board.fast_check_win(move[0], move[1], self.player_id):
-                return move, 1_000_000, 1, time.time() - self.start_time
+                return move, 1_000_000, 1, time.time() - self.start_time # ply=0 win
 
         # BƯỚC 0.5: Chặn đối thủ thắng ngay (Bắt buộc phải chặn trước khi nghĩ đến Fork)
         for move in legal_moves:
@@ -95,6 +105,8 @@ class CaroAI:
         final_best_move  = legal_moves[0]
         final_best_score = -math.inf
 
+        root_beta = math.inf
+
         # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
         # Sửa: Chỉ dùng Depth chẵn để tránh Horizon Effect (2, 4)
         search_range = [self.depth] if self.time_limit is None else range(2, self.depth + 1, 2)
@@ -102,6 +114,7 @@ class CaroAI:
         for current_depth in search_range:
             depth_best_move  = None
             depth_best_score = -math.inf
+            alpha = -math.inf
 
             try:
                 for move in legal_moves:
@@ -112,17 +125,17 @@ class CaroAI:
                     board.make_move(*move)
                     # Đoạn code cũ trong get_move
                     if mode == "minimax":
-                        score = self.minimax(board, current_depth - 1, False)
-                    elif mode == "alpha_beta":
-                        score = self.alpha_beta(board, current_depth - 1, -math.inf, math.inf, False)
-                    # [MỚI] Thêm nhánh gọi PVS
-                    elif mode == "pvs":
-                        score = self.pvs(board, current_depth - 1, -math.inf, math.inf, False)
+                        score = self.minimax(board, current_depth - 1, False, ply=1)
+                    else:
+                        score = self.alpha_beta(board, current_depth - 1, alpha, root_beta, False, ply=1, use_pvs=(mode == "alphabeta"))
                     board.undo_move()
 
                     if score > depth_best_score:
                         depth_best_score = score
                         depth_best_move  = move
+                    
+                    # Cập nhật alpha để các nước đi sau ở Root được cắt tỉa
+                    alpha = max(alpha, depth_best_score)
 
                 # [QUAN TRỌNG] Chỉ cập nhật kết quả cuối cùng khi đã hoàn thành trọn vẹn độ sâu này
                 final_best_move  = depth_best_move
@@ -142,13 +155,19 @@ class CaroAI:
         duration = time.time() - self.start_time
         return final_best_move, final_best_score, self.nodes_visited, duration
 
+    def _check_timeout(self):
+        """Gộp logic timeout vào một chỗ, tránh lặp code."""
+        if self.nodes_visited % 200 == 0:   # Tăng từ 100 → 200 để giảm overhead time.time()
+            if self.time_limit is not None and time.time() - self.start_time > self.time_limit:
+                raise SearchTimeout()
+
     # ──────────────────────────────────────────────────────────
     # Alpha-Beta
     # ──────────────────────────────────────────────────────────
     # ──────────────────────────────────────────────────────────
     # Alpha-Beta (Đã tối ưu: Move Ordering với TT-Move)
     # ──────────────────────────────────────────────────────────
-    def alpha_beta(self, board, depth, alpha, beta, is_maximizing):
+    def alpha_beta(self, board, depth, alpha, beta, is_maximizing, ply=0, use_pvs=True):
         self.nodes_visited += 1
 
         board_hash              = board.get_hash()
@@ -170,15 +189,11 @@ class CaroAI:
                 if alpha >= beta:
                     return tt_val
 
-        # Kiểm tra timeout (giữ nguyên của bạn)
-        if self.nodes_visited % 100 == 0:
-            if self.time_limit is not None and \
-               time.time() - self.start_time > self.time_limit:
-                raise SearchTimeout()
+        self._check_timeout()
 
         result = board.check_win()
-        if result == self.player_id:  return  1_000_000 + depth
-        if result == self.opp_id:     return -1_000_000 - depth
+        if result == self.player_id:  return  1_000_000 - ply
+        if result == self.opp_id:     return -1_000_000 + ply
         if result == -1:              return  0
         if depth == 0:                return  self.heuristic(board)
 
@@ -198,9 +213,19 @@ class CaroAI:
 
         if is_maximizing:
             best_score = -math.inf
-            for move in legal_moves:
+            for i, move in enumerate(legal_moves):
                 board.make_move(*move)
-                val = self.alpha_beta(board, depth - 1, alpha, beta, False)
+                
+                if use_pvs and i > 0:
+                    # Null Window Search: Giả định nước này tệ hơn alpha
+                    val = self.alpha_beta(board, depth - 1, alpha, alpha + 1, False, ply + 1, True)
+                    if alpha < val < beta:
+                        # Fail-high: Tìm kiếm lại với cửa sổ đầy đủ
+                        val = self.alpha_beta(board, depth - 1, val, beta, False, ply + 1, True)
+                else:
+                    # Tìm kiếm Alpha-Beta truyền thống (hoặc nước đầu tiên của PVS)
+                    val = self.alpha_beta(board, depth - 1, alpha, beta, False, ply + 1, use_pvs)
+                
                 board.undo_move()
                 
                 # [MỚI] Cập nhật best_move_found
@@ -213,9 +238,17 @@ class CaroAI:
                     break
         else:
             best_score = math.inf
-            for move in legal_moves:
+            for i, move in enumerate(legal_moves):
                 board.make_move(*move)
-                val = self.alpha_beta(board, depth - 1, alpha, beta, True)
+                
+                if use_pvs and i > 0:
+                    # Null Window Search cho phía Minimizing
+                    val = self.alpha_beta(board, depth - 1, beta - 1, beta, True, ply + 1, True)
+                    if alpha < val < beta:
+                        val = self.alpha_beta(board, depth - 1, alpha, val, True, ply + 1, True)
+                else:
+                    val = self.alpha_beta(board, depth - 1, alpha, beta, True, ply + 1, use_pvs)
+
                 board.undo_move()
                 
                 # [MỚI] Cập nhật best_move_found
@@ -234,107 +267,17 @@ class CaroAI:
         # [MỚI] Lưu best_move_found vào TT thay vì để None
         self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
         return best_score
-# ──────────────────────────────────────────────────────────
-    # Principal Variation Search (PVS) - Đẳng cấp Game Engine
-    # ──────────────────────────────────────────────────────────
-    def pvs(self, board, depth, alpha, beta, is_maximizing):
-        self.nodes_visited += 1
-
-        board_hash = board.get_hash()
-        alpha_orig, beta_orig = alpha, beta
-        tt_move = None
-
-        # 1. Kiểm tra Transposition Table
-        if board_hash in self.transposition_table:
-            tt_depth, tt_flag, tt_val, tt_move = self.transposition_table[board_hash]
-            if tt_depth >= depth:
-                if tt_flag == "EXACT": return tt_val
-                elif tt_flag == "LOWER": alpha = max(alpha, tt_val)
-                elif tt_flag == "UPPER": beta = min(beta, tt_val)
-                if alpha >= beta: return tt_val
-
-        if self.nodes_visited % 100 == 0 and self.time_limit is not None:
-            if time.time() - self.start_time > self.time_limit:
-                raise SearchTimeout()
-
-        result = board.check_win()
-        if result == self.player_id: return 1_000_000 + depth
-        if result == self.opp_id:    return -1_000_000 - depth
-        if result == -1:             return 0
-        if depth == 0:               return self.heuristic(board)
-
-        legal_moves = board.get_legal_moves()
-
-        # Đưa TT-Move lên đầu để PVS phát huy tối đa sức mạnh
-        if tt_move is not None and tt_move in legal_moves:
-            legal_moves.remove(tt_move)
-            legal_moves.insert(0, tt_move)
-
-        best_move_found = None
-
-        if is_maximizing:
-            best_score = -math.inf
-            for i, move in enumerate(legal_moves):
-                board.make_move(*move)
-                
-                if i == 0:
-                    # Nước đi đầu tiên (Principal Variation): Duyệt full window
-                    val = self.pvs(board, depth - 1, alpha, beta, False)
-                else:
-                    # Các nước sau: Duyệt Null Window (alpha, alpha + 1) để chứng minh nó tệ hơn
-                    val = self.pvs(board, depth - 1, alpha, alpha + 1, False)
-                    if alpha < val < beta:
-                        # Fail-high (phát hiện nước này tốt hơn dự kiến), duyệt lại full window
-                        val = self.pvs(board, depth - 1, val, beta, False)
-                        
-                board.undo_move()
-
-                if val > best_score:
-                    best_score = val
-                    best_move_found = move
-                alpha = max(alpha, best_score)
-                if beta <= alpha:
-                    break # Cut-off
-        else:
-            best_score = math.inf
-            for i, move in enumerate(legal_moves):
-                board.make_move(*move)
-                
-                if i == 0:
-                    val = self.pvs(board, depth - 1, alpha, beta, True)
-                else:
-                    # Null Window cho MIN player
-                    val = self.pvs(board, depth - 1, beta - 1, beta, True)
-                    if alpha < val < beta:
-                        val = self.pvs(board, depth - 1, alpha, val, True)
-                        
-                board.undo_move()
-
-                if val < best_score:
-                    best_score = val
-                    best_move_found = move
-                beta = min(beta, best_score)
-                if beta <= alpha:
-                    break # Cut-off
-
-        # Lưu lại TT
-        flag = "UPPER" if best_score <= alpha_orig else "LOWER" if best_score >= beta_orig else "EXACT"
-        self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
-        return best_score
     # ──────────────────────────────────────────────────────────
     # Minimax thuần túy
     # ──────────────────────────────────────────────────────────
-    def minimax(self, board, depth, is_maximizing):
+    def minimax(self, board, depth, is_maximizing, ply=0):
         self.nodes_visited += 1
 
-        if self.nodes_visited % 100 == 0:
-            if self.time_limit is not None and \
-               time.time() - self.start_time > self.time_limit:
-                raise SearchTimeout()
+        self._check_timeout()
 
         result = board.check_win()
-        if result == self.player_id:  return  1_000_000 + depth
-        if result == self.opp_id:     return -1_000_000 - depth
+        if result == self.player_id:  return  1_000_000 - ply
+        if result == self.opp_id:     return -1_000_000 + ply
         if result == -1:              return  0
         if depth == 0:                return  self.heuristic(board)
 
@@ -344,14 +287,14 @@ class CaroAI:
             best = -math.inf
             for move in legal_moves:
                 board.make_move(*move)
-                best = max(best, self.minimax(board, depth - 1, False))
+                best = max(best, self.minimax(board, depth - 1, False, ply + 1))
                 board.undo_move()
             return best
         else:
             best = math.inf
             for move in legal_moves:
                 board.make_move(*move)
-                best = min(best, self.minimax(board, depth - 1, True))
+                best = min(best, self.minimax(board, depth - 1, True, ply + 1))
                 board.undo_move()
             return best
 
