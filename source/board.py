@@ -89,8 +89,8 @@ class Board:
             return self.OPEN2_WIN_VAL if is_open else self.HALF2_WIN_VAL
         return 10 # count == 1
 
-    def _compute_score_delta(self, row, col, player) -> int:
-        opp  = 3 - player
+    def _compute_score_delta(self, row, col, player_moving) -> int:
+        opp  = 3 - player_moving
         delta = 0
         wc    = self.win_condition
         size  = self.size
@@ -122,27 +122,27 @@ class Board:
                     if (p_idx == 1 and p2_cnt > 0) or (p_idx == 2 and p1_cnt > 0): continue
                     
                     other = 3 - p_idx
-                    is_ai = (p_idx == 2)
+                    # Luôn tính điểm từ góc nhìn Player 2 (O) - Player 1 (X)
+                    multiplier = 1 if p_idx == 2 else -1
                     cnt = p1_cnt if p_idx == 1 else p2_cnt
                     
-                    # Check chặn bằng dữ liệu từ 'line' đã fetch
                     b_s = (line[start-1] == other or line[start-1] == -1)
                     b_e = (line[end] == other or line[end] == -1)
 
-                    if player == p_idx: # Tăng điểm cho quân mình
-                        s_before = self._get_window_score(cnt, 0, b_s, b_e, is_ai)
-                        s_after  = self._get_window_score(cnt + 1, 0, b_s, b_e, is_ai)
-                    else: # Chặn điểm của đối thủ (đối thủ đang có quân trong window này)
+                    if player_moving == p_idx:
+                        s_before = self._get_window_score(cnt, 0, b_s, b_e, True)
+                        s_after  = self._get_window_score(cnt + 1, 0, b_s, b_e, True)
+                    else:
                         if cnt == 0: continue
-                        s_before = self._get_window_score(cnt, 0, b_s, b_e, is_ai)
+                        s_before = self._get_window_score(cnt, 0, b_s, b_e, True)
                         s_after  = 0
                     
                     wd = s_after - s_before
-                    delta += wd if is_ai else -wd
+                    delta += wd * multiplier
 
         ctr = size >> 1
         center_val = max(0, 40 - (abs(row-ctr) + abs(col-ctr)) * 3)
-        delta += center_val if player == 2 else -center_val
+        delta += center_val if player_moving == 2 else -center_val
         return delta
 
     def make_move(self, row, col) -> bool:
@@ -180,11 +180,12 @@ class Board:
         self._remove_neighbors(row, col)
         size = self.size
         grid = self.grid
-        ref  = sum(1 for dr, dc in self._NEIGHBOR_OFFSETS
-                   if 0 <= row+dr < size and 0 <= col+dc < size
-                   and grid[(row+dr)*size + col+dc] != 0)
-        if ref > 0:
-            self._cand_refs[idx] = ref
+        has_neighbor = any(0 <= row+dr < size and 0 <= col+dc < size 
+                          and grid[(row+dr)*size + col+dc] != 0
+                          for dr, dc in self._NEIGHBOR_OFFSETS)
+
+        if has_neighbor:
+            self._cand_refs[idx] = 1
             self._candidates.add((row, col))
         return True
 
@@ -240,20 +241,22 @@ class Board:
         ctr  = self.size >> 1
         size = self.size
 
-        max_moves = min(20 + (self.size - 9), 28)
+        # Tăng giới hạn nước đi cho bàn lớn để tránh bỏ sót các nước quan trọng ở xa
+        max_moves = min(25 + (self.size - 9) * 2, 45) if size > 9 else 20
 
-        wins = []; blocks = []; normal = []
+        # PASS 1: Tìm nước thắng ngay để kết thúc sớm
         for pos in self._candidates:
-            r, c = pos
-            if self.fast_check_win(r, c, cur):
-                wins.append(pos)
-            elif self.fast_check_win(r, c, opp):
+            if self.fast_check_win(pos[0], pos[1], cur):
+                return [pos]
+
+        # PASS 2: Phân loại nước chặn và nước thường
+        blocks = []
+        normal = []
+        for pos in self._candidates:
+            if self.fast_check_win(pos[0], pos[1], opp):
                 blocks.append(pos)
             else:
                 normal.append(pos)
-
-        if wins:
-            return wins
 
         remaining = max_moves - len(blocks)
         if remaining > 0 and normal:
