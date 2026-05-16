@@ -3,12 +3,14 @@ import pygame
 import os
 import sys
 import threading
+import time
 
 # ─── Import source logic ──
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 from source.board import Board
 from source.AI import CaroAI
+from source.utils import log_game_result, log_ai_move
 from gui.button import Button, ImageButton
 from gui.sound_manager import SoundManager
 
@@ -28,13 +30,14 @@ STATE_GAME         = "game"
 PLAYER_X = 1
 PLAYER_O = 2
 
-AI_TIME_LIMIT = 10
+AI_TIME_LIMIT = 5
 
 # Level → depth mapping
 LEVEL_DEPTH = {
-    "easy":   2,
-    "medium": 4,
-    "hard":   6,
+    "easy":      2,
+    "medium":    3,
+    "hard":      4,
+    "very_hard": 6,
 }
 
 # ─── Tiện ích ──
@@ -58,12 +61,6 @@ def draw_text_centered(surface, text, font, color, center, shadow=True):
 # ─── BoardSizePopup──────────
 
 class BoardSizePopup:
-    """
-    Popup nhập kích thước bàn cờ.
-    Hiện ra khi người dùng click nút "Kích thước" ở Main Menu.
-    Trả về size (int) khi xác nhận, hoặc None khi huỷ.
-    """
-
     PANEL_W = 400
     PANEL_H = 260
     MIN_SIZE = 5
@@ -82,12 +79,10 @@ class BoardSizePopup:
 
         px, py = self.panel_rect.topleft
 
-        # Ô nhập liệu
-        self.input_rect  = pygame.Rect(cx - 80, py + 110, 160, 48)
-        self.input_text  = str(current_size)
-        self.input_active = True          # luôn active khi popup mở
+        self.input_rect   = pygame.Rect(cx - 80, py + 110, 160, 48)
+        self.input_text   = str(current_size)
+        self.input_active = True
 
-        # Nút xác nhận / huỷ
         btn_y = py + self.PANEL_H - 68
         self.btn_ok     = Button(cx - 110, btn_y, 100, 46, "OK")
         self.btn_cancel = Button(cx + 10,  btn_y, 100, 46, "Huỷ")
@@ -97,19 +92,17 @@ class BoardSizePopup:
         self._font_input = pygame.font.SysFont("Times New Roman", 28, bold=True)
         self._font_hint  = pygame.font.SysFont("Times New Roman", 13)
 
-        self._cursor_timer = 0   # dùng để nhấp nháy cursor
+        self._cursor_timer = 0
 
-    # ── Mở / đóng───────────
     def open(self, current_size=15):
-        self.input_text  = str(current_size)
+        self.input_text   = str(current_size)
         self.input_active = True
-        self.visible     = True
+        self.visible      = True
         self._cursor_timer = 0
 
     def close(self):
         self.visible = False
 
-    # ── Lấy giá trị hợp lệ─
     def _parse_size(self):
         try:
             v = int(self.input_text)
@@ -119,14 +112,7 @@ class BoardSizePopup:
             pass
         return None
 
-    # ── Xử lý sự kiện───────
     def handle_event(self, event):
-        """
-        Trả về:
-          None      → chưa xong
-          int       → size hợp lệ, đóng popup
-          "cancel"  → người dùng huỷ
-        """
         if not self.visible:
             return None
 
@@ -142,7 +128,6 @@ class BoardSizePopup:
             elif event.key == pygame.K_BACKSPACE:
                 self.input_text = self.input_text[:-1]
             else:
-                # Chỉ cho nhập số, tối đa 2 ký tự
                 if event.unicode.isdigit() and len(self.input_text) < 2:
                     self.input_text += event.unicode
 
@@ -169,7 +154,6 @@ class BoardSizePopup:
         if not self.visible:
             return
 
-        # Overlay mờ
         overlay = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 170))
         surface.blit(overlay, (0, 0))
@@ -177,26 +161,21 @@ class BoardSizePopup:
         px, py = self.panel_rect.topleft
         cx     = self.panel_rect.centerx
 
-        # Panel nền
         ps = pygame.Surface(self.panel_rect.size, pygame.SRCALPHA)
         pygame.draw.rect(ps, (40, 24, 8, 245), ps.get_rect(), border_radius=20)
         pygame.draw.rect(ps, (200, 150, 60, 220), ps.get_rect(), width=3, border_radius=20)
         surface.blit(ps, (px, py))
 
-        # Tiêu đề
         title = self._font_title.render("Kích thước bàn cờ", True, (255, 220, 90))
         surface.blit(title, title.get_rect(centerx=cx, top=py + 18))
 
-        # Nhãn gợi ý
         hint_text = f"Nhập số từ {self.MIN_SIZE} đến {self.MAX_SIZE}:"
         hint = self._font_label.render(hint_text, True, (210, 175, 110))
         surface.blit(hint, hint.get_rect(centerx=cx, top=py + 68))
 
-        # Ô nhập liệu
-        ir = self.input_rect
+        ir    = self.input_rect
         valid = self._parse_size() is not None or self.input_text == ""
 
-        # Màu viền ô nhập: vàng nếu hợp lệ, đỏ nếu không hợp lệ
         if self.input_text == "":
             border_color = (180, 140, 60)
         elif valid:
@@ -204,18 +183,15 @@ class BoardSizePopup:
         else:
             border_color = (220, 80, 80)
 
-        pygame.draw.rect(surface, (20, 12, 4),     ir, border_radius=8)
-        pygame.draw.rect(surface, border_color,    ir, width=2, border_radius=8)
+        pygame.draw.rect(surface, (20, 12, 4),  ir, border_radius=8)
+        pygame.draw.rect(surface, border_color, ir, width=2, border_radius=8)
 
-        # Văn bản trong ô
         disp_text = self.input_text
-        # Nhấp nháy cursor
         if (self._cursor_timer // 30) % 2 == 0:
             disp_text += "|"
         txt_surf = self._font_input.render(disp_text, True, (255, 240, 180))
         surface.blit(txt_surf, txt_surf.get_rect(center=ir.center))
 
-        # Thông báo lỗi nếu ngoài khoảng
         if self.input_text and not valid:
             err = self._font_hint.render(
                 f"Vui lòng nhập từ {self.MIN_SIZE}–{self.MAX_SIZE}",
@@ -226,11 +202,9 @@ class BoardSizePopup:
         self.btn_cancel.draw(surface)
 
 
-# ─── _ToggleButton ─── (widget nội bộ)
+# ─── _ToggleButton ───────────────────────────────────────────────────────────
 
 class _ToggleButton(Button):
-    """Button có trạng thái active / inactive – tông nâu vàng."""
-
     COLOR_ACTIVE    = (190, 140,  35)
     HOVER_ACTIVE    = (210, 160,  50)
     BORDER_ACTIVE   = (255, 215,  80)
@@ -264,17 +238,17 @@ class _ToggleButton(Button):
         surface.blit(txt, txt.get_rect(center=rect.center))
 
 
-# ─── ModeSelectScreen ──────
+# ─── ModeSelectScreen ────────────────────────────────────────────────────────
 
 class ModeSelectScreen:
     PANEL_W = 540
     PANEL_H = 510
 
     def __init__(self, screen_w, screen_h, game_mode, board_size=15):
-        self.sw        = screen_w
-        self.sh        = screen_h
-        self.game_mode = game_mode
-        self.board_size = board_size       # nhận từ MainMenu
+        self.sw         = screen_w
+        self.sh         = screen_h
+        self.game_mode  = game_mode
+        self.board_size = board_size
 
         self.selected_algo  = "alpha_beta"
         self.selected_level = "medium"
@@ -300,16 +274,17 @@ class ModeSelectScreen:
         self.btn_minimax   = _ToggleButton(left2_x,  algo_y, btn_w2, btn_h, "Minimax")
         self.btn_alphabeta = _ToggleButton(right2_x, algo_y, btn_w2, btn_h, "Alpha-Beta")
 
-        # ── Hàng level (3 nút)
-        btn_w3 = 130
-        gap3   = 14
-        total3 = 3 * btn_w3 + 2 * gap3
+        # ── Hàng level (4 nút)
+        btn_w3 = 110
+        gap3   = 10
+        total3 = 4 * btn_w3 + 3 * gap3
         lv_x0  = cx - total3 // 2
         lv_y   = algo_y + btn_h + 40
 
-        self.btn_easy   = _ToggleButton(lv_x0,                   lv_y, btn_w3, btn_h, "Dễ")
-        self.btn_medium = _ToggleButton(lv_x0 + btn_w3 + gap3,   lv_y, btn_w3, btn_h, "Trung bình")
-        self.btn_hard   = _ToggleButton(lv_x0 + 2*(btn_w3+gap3), lv_y, btn_w3, btn_h, "Khó")
+        self.btn_easy      = _ToggleButton(lv_x0,                   lv_y, btn_w3, btn_h, "Dễ")
+        self.btn_medium    = _ToggleButton(lv_x0 + btn_w3 + gap3,   lv_y, btn_w3, btn_h, "Trung bình")
+        self.btn_hard      = _ToggleButton(lv_x0 + 2*(btn_w3+gap3), lv_y, btn_w3, btn_h, "Khó")
+        self.btn_very_hard = _ToggleButton(lv_x0 + 3*(btn_w3+gap3), lv_y, btn_w3, btn_h, "Siêu khó")
 
         # ── Hàng chọn phe
         side_y = lv_y + btn_h + 40
@@ -319,8 +294,8 @@ class ModeSelectScreen:
 
         # ── Nút xác nhận / quay lại
         confirm_y = py + self.PANEL_H - 68
-        self.btn_confirm = Button(cx - 110,  confirm_y, 220, 50, "BẮT ĐẦU")
-        self.btn_back    = Button(px + 14,   confirm_y, 110, 50, "Quay lại")
+        self.btn_confirm = Button(cx - 110, confirm_y, 220, 50, "BẮT ĐẦU")
+        self.btn_back    = Button(px + 14,  confirm_y, 110, 50, "Quay lại")
 
         self._font_title = pygame.font.SysFont("Times New Roman", 28, bold=True)
         self._font_label = pygame.font.SysFont("Times New Roman", 18, bold=True)
@@ -333,21 +308,24 @@ class ModeSelectScreen:
         self.btn_easy.active      = (self.selected_level == "easy")
         self.btn_medium.active    = (self.selected_level == "medium")
         self.btn_hard.active      = (self.selected_level == "hard")
+        self.btn_very_hard.active = (self.selected_level == "very_hard")
         self.btn_x.active         = (self.selected_side  == PLAYER_X)
         self.btn_o.active         = (self.selected_side  == PLAYER_O)
 
     def handle_event(self, event):
         if self.game_mode == "Ai":
             if self.btn_minimax.is_clicked(event):
-                self.selected_algo = "minimax";    self._refresh_toggle()
+                self.selected_algo = "minimax";     self._refresh_toggle()
             if self.btn_alphabeta.is_clicked(event):
-                self.selected_algo = "alpha_beta"; self._refresh_toggle()
+                self.selected_algo = "alpha_beta";  self._refresh_toggle()
             if self.btn_easy.is_clicked(event):
-                self.selected_level = "easy";      self._refresh_toggle()
+                self.selected_level = "easy";       self._refresh_toggle()
             if self.btn_medium.is_clicked(event):
-                self.selected_level = "medium";    self._refresh_toggle()
+                self.selected_level = "medium";     self._refresh_toggle()
             if self.btn_hard.is_clicked(event):
-                self.selected_level = "hard";      self._refresh_toggle()
+                self.selected_level = "hard";       self._refresh_toggle()
+            if self.btn_very_hard.is_clicked(event):
+                self.selected_level = "very_hard";  self._refresh_toggle()
 
         if self.btn_x.is_clicked(event):
             self.selected_side = PLAYER_X; self._refresh_toggle()
@@ -363,7 +341,7 @@ class ModeSelectScreen:
                 "algo":       self.selected_algo,
                 "ai_depth":   LEVEL_DEPTH[self.selected_level],
                 "human_side": self.selected_side,
-                "board_size": self.board_size,   # truyền size vào game
+                "board_size": self.board_size,
             }
         return None
 
@@ -374,6 +352,7 @@ class ModeSelectScreen:
             self.btn_easy.update(mouse_pos, mouse_buttons)
             self.btn_medium.update(mouse_pos, mouse_buttons)
             self.btn_hard.update(mouse_pos, mouse_buttons)
+            self.btn_very_hard.update(mouse_pos, mouse_buttons)
         self.btn_x.update(mouse_pos, mouse_buttons)
         self.btn_o.update(mouse_pos, mouse_buttons)
         self.btn_confirm.update(mouse_pos, mouse_buttons)
@@ -385,13 +364,11 @@ class ModeSelectScreen:
         px, py = self.panel_rect.topleft
         cx = self.panel_rect.centerx
 
-        # Panel nền
         ps = pygame.Surface(self.panel_rect.size, pygame.SRCALPHA)
         pygame.draw.rect(ps, (40, 24,  8, 240), ps.get_rect(), border_radius=22)
         pygame.draw.rect(ps, (190, 140, 55, 210), ps.get_rect(), width=3, border_radius=22)
         surface.blit(ps, (px, py))
 
-        # Tiêu đề — kèm size bàn cờ để người chơi biết
         mode_str = "VS MÁY" if self.game_mode == "Ai" else "VS NGƯỜI"
         title = self._font_title.render(
             f"Cài đặt — {mode_str}  [{self.board_size}×{self.board_size}]",
@@ -410,6 +387,7 @@ class ModeSelectScreen:
             self.btn_easy.draw(surface)
             self.btn_medium.draw(surface)
             self.btn_hard.draw(surface)
+            self.btn_very_hard.draw(surface)
 
             sep_y2 = self.btn_easy.rect.bottom + 14
             lbl2 = self._font_label.render("Bạn muốn đánh quân nào?", True, (235, 200, 120))
@@ -426,7 +404,7 @@ class ModeSelectScreen:
         self.btn_back.draw(surface)
 
 
-# ─── SettingMenu ─
+# ─── SettingMenu ─────────────────────────────────────────────────────────────
 
 class SettingMenu:
     BTN_SIZE    = (320, 85)
@@ -500,8 +478,7 @@ class SettingMenu:
         self.btn_surrender.draw(surface)
 
 
-# ─── WinScreen ───
-# FIX: nhận thêm mode và human_side để hiển thị đúng tên người thắng
+# ─── WinScreen 
 
 class WinScreen:
     BTN_W, BTN_H = 280, 80
@@ -516,7 +493,7 @@ class WinScreen:
         self._mode       = "human"
         self._human_side = PLAYER_X
 
-        cx   = screen_w // 2
+        cx    = screen_w // 2
         box_h = 260
         box_y = screen_h // 2 - box_h // 2
 
@@ -595,7 +572,7 @@ class WinScreen:
         hl.fill((255, 255, 255, 25))
         surface.blit(hl, self.box.topleft)
 
-        # FIX: dùng _winner_label() thay vì hardcode "Người chơi 1/2"
+        # dùng _winner_label() thay vì hardcode "Người chơi 1/2"
         line1, line2 = self._winner_label()
         t1 = self._font_title.render(f" {line1}", True, (80, 40, 0))
         t2 = self._font_sub.render(line2, True, (160, 90, 10))
@@ -660,7 +637,7 @@ class MoveHistoryPanel:
             surface.blit(empty, (x0, y0))
 
 
-# ─── GameScreen ──
+# ─── GameScreen ──────────────────────────────────────────────────────────────
 
 class GameScreen:
     """
@@ -712,16 +689,20 @@ class GameScreen:
 
         self.winner    = None
         self.game_over = False
+        self.start_time = time.time()
 
         self.token_x    = load_img("token_x.png", (self.CELL - 6, self.CELL - 6))
         self.token_o    = load_img("token_o.png", (self.CELL - 6, self.CELL - 6))
         self.turn_x_img = load_img("turn_X.png",  (220, 55))
         self.turn_o_img = load_img("turn_o.png",  (220, 55))
 
+        # Tạo đường dẫn log tuyệt đối dựa trên thư mục gốc dự án
+        self.move_log_path = self._generate_log_path()
+
         self.img_score_raw = pygame.image.load(
             os.path.join(ASSETS, "score.png")).convert_alpha()
-        self.img_human = load_img("human.png",  (72, 72))
-        self.img_robot = load_img("robot.png",  (72, 72))
+        self.img_human = load_img("human.png", (72, 72))
+        self.img_robot = load_img("robot.png", (72, 72))
 
         # FIX: dùng key ngữ nghĩa thay vì PLAYER_X/O
         # AI mode  : "human" = người, "ai" = máy
@@ -736,8 +717,8 @@ class GameScreen:
         self.btn_setting = ImageButton("button_setting.png", (btn_cx + 50, 55),  (210, 58))
         self.btn_undo    = ImageButton("button_undo.png",    (btn_cx + 50, 130), (210, 58))
 
-        self._font_mode     = pygame.font.SysFont("Times New Roman", 18)
-        self._font_algo     = pygame.font.SysFont("Times New Roman", 14)
+        self._font_mode = pygame.font.SysFont("Times New Roman", 18)
+        self._font_algo = pygame.font.SysFont("Times New Roman", 14)
 
         self._board_surface = self._make_board_surface()
 
@@ -784,10 +765,25 @@ class GameScreen:
             return by // self.CELL, bx // self.CELL
         return None
 
+    def _generate_log_path(self):
+        """Tự động tìm số thứ tự ván đấu tiếp theo để lưu vào file riêng."""
+        i = 1
+        while True:
+            filename = f"van_dau_{self.board_size}_{i}.csv"
+            path = os.path.join(_ROOT, "logs", filename)
+            if not os.path.exists(path):
+                return path
+            i += 1
+
     def restart(self):
         self.board_obj = Board(size=self.board_size, win_condition=WIN_COND)
         self.winner    = None
         self.game_over = False
+        
+        # Khi restart, tạo một file log mới cho ván mới
+        self.move_log_path = self._generate_log_path()
+        
+        self.start_time = time.time()
         if self.mode == "Ai":
             self.ai_thinking = False
             self.ai_result   = None
@@ -798,7 +794,7 @@ class GameScreen:
 
     def _score_key(self, player_id):
         """
-        FIX: ánh xạ PLAYER_X/O → key ngữ nghĩa.
+        ánh xạ PLAYER_X/O → key ngữ nghĩa.
         Người luôn → "human", máy/người-2 → "ai".
         """
         return "human" if player_id == self.human_side else "ai"
@@ -810,7 +806,8 @@ class GameScreen:
     def _run_ai(self, board_copy):
         move, _, _, _ = self.ai.get_move(board_copy,
                                          mode=self.algo,
-                                         time_limit=AI_TIME_LIMIT)
+                                         time_limit=AI_TIME_LIMIT,
+                                         log_path=self.move_log_path)
         self.ai_result = move
 
     def _trigger_ai(self):
@@ -838,24 +835,32 @@ class GameScreen:
             self.winner    = result
             self.game_over = True
             self._add_score(result)
-            # FIX: truyền mode và human_side vào win_screen.show()
+            # truyền mode và human_side vào win_screen.show()
             self.win_screen.show(result, mode=self.mode, human_side=self.human_side)
         elif result == -1:
             self.game_over = True
+            self._log_result(-1)
 
     def _place_move(self, row, col):
+        moving_player = self.board_obj.current_player
         if not self.board_obj.make_move(row, col):
             return False
+
+        # Ghi log nước đi của con người
+        p_label = 'X' if moving_player == PLAYER_X else 'O'
+        log_ai_move(self.move_log_path, [p_label, f"({row}, {col})", 0, 0, 0, 0])
+
         SoundManager().play("place_x")
         result = self.board_obj.check_win()
         if result in (PLAYER_X, PLAYER_O):
             self.winner    = result
             self.game_over = True
             self._add_score(result)
-            # FIX: truyền mode và human_side vào win_screen.show()
+            #  truyền mode và human_side vào win_screen.show()
             self.win_screen.show(result, mode=self.mode, human_side=self.human_side)
         elif result == -1:
             self.game_over = True
+            self._log_result(-1)
         return True
 
     def _undo(self):
@@ -897,7 +902,7 @@ class GameScreen:
             winner = PLAYER_O if self.current == PLAYER_X else PLAYER_X
             self.winner    = winner
             self.game_over = True
-            self._add_score(winner)
+            self._log_result(winner)
             self.setting.close()
             # FIX: truyền mode và human_side
             self.win_screen.show(winner, mode=self.mode, human_side=self.human_side)
@@ -1026,7 +1031,7 @@ class GameScreen:
 
         if self.mode == "Ai":
             algo_label  = "Minimax" if self.algo == "minimax" else "Alpha-Beta"
-            level_names = {1: "Dễ", 2: "Trung bình", 3: "Khó"}
+            level_names = {2: "Dễ", 3: "Trung bình", 4: "Khó", 6: "Siêu khó"}
             level_label = level_names.get(self.ai_depth, str(self.ai_depth))
             side_label  = "X" if self.human_side == PLAYER_X else "O"
             at = self._font_algo.render(
@@ -1044,14 +1049,14 @@ class GameScreen:
 
 class MainMenu:
     BTN_SIZE      = (280, 110)
-    BTN_SIZE_ICON = (200, 60)   # nút chọn kích thước bàn cờ
+    BTN_SIZE_ICON = (200, 60)
 
     def __init__(self, screen_w, screen_h):
         self.sw = screen_w
         self.sh = screen_h
         self.bg = load_img("background.png", (screen_w, screen_h), alpha=False)
 
-        self.board_size = 15   # kích thước bàn cờ hiện tại, mặc định 15
+        self.board_size = 15
 
         cx = screen_w // 2
 
@@ -1060,26 +1065,22 @@ class MainMenu:
         self.btn_human = ImageButton("button_play_with_human.png",
                                      (cx + 160, screen_h // 2 + 60), self.BTN_SIZE)
 
-        # Nút mở popup nhập size bàn cờ — đặt ở góc dưới giữa
         self.btn_size = Button(
             cx - 100, screen_h // 2 + 170,
             200, 50,
             f"Bàn cờ: {self.board_size}×{self.board_size}"
         )
 
-        # Popup nhập kích thước
         self.popup = BoardSizePopup(screen_w, screen_h, current_size=self.board_size)
 
         self._font_hint = pygame.font.SysFont("Times New Roman", 14)
 
     def handle_event(self, event):
-        # Popup ưu tiên xử lý trước
         if self.popup.visible:
             result = self.popup.handle_event(event)
             if isinstance(result, int):
                 self.board_size = result
                 self.btn_size.text = f"Bàn cờ: {self.board_size}×{self.board_size}"
-            # "cancel" hoặc None → không làm gì thêm
             return None
 
         if self.btn_size.is_clicked(event):
@@ -1093,7 +1094,7 @@ class MainMenu:
     def update(self, mouse_pos, mouse_buttons):
         self.popup.update(mouse_pos, mouse_buttons)
         if self.popup.visible:
-            return   # chặn hover các nút phía sau khi popup mở
+            return
         self.btn_ai.update(mouse_pos, mouse_buttons)
         self.btn_human.update(mouse_pos, mouse_buttons)
         self.btn_size.update(mouse_pos, mouse_buttons)
@@ -1103,14 +1104,14 @@ class MainMenu:
         self.btn_ai.draw(surface)
         self.btn_human.draw(surface)
         self.btn_size.draw(surface)
-        self.popup.draw(surface)   # vẽ popup lên trên cùng
+        self.popup.draw(surface)
 
     @property
     def bg_surface(self):
         return self.bg
 
 
-# ─── CaroGUI ─
+# ─── CaroGUI 
 
 class CaroGUI:
     def __init__(self):
@@ -1127,7 +1128,6 @@ class CaroGUI:
         self.sfx.play_bgm("sound_background.mp3", volume=0.4)
 
     def _open_mode_select(self, game_mode):
-        # Truyền board_size từ menu vào ModeSelectScreen
         self.mode_select = ModeSelectScreen(
             SCREEN_W, SCREEN_H, game_mode,
             board_size=self.menu.board_size

@@ -50,7 +50,8 @@ STATES = {
 }
 
 def run_benchmark():
-    log_file = "logs/logs_benchmark.csv"
+    _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    log_file = os.path.join(_ROOT, "logs", "logs_benchmark.csv")
     board_size = 9
     win_condition = 4
     
@@ -88,6 +89,9 @@ def run_benchmark():
                     mode=algo, 
                     time_limit=None 
                 )
+
+                print(f"   -> {algo:12} | Depth: {depth} | Nodes: {nodes_visited:8} | "
+                      f"Score: {best_score:10} | Time: {duration:8.4f}s")
 
                 # 4. Lưu lại kết quả theo đúng cấu trúc của hàm log_benchmark_step
                 # ['Turn', 'Algorithm', 'Depth', 'Nodes_Visited', 'Time_Seconds', 'Score', 'Move']

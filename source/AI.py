@@ -1,5 +1,6 @@
 import math
 import time
+from source.utils import log_ai_move
 
 class SearchTimeout(Exception):
     """Ngoại lệ tùy chỉnh để dừng tìm kiếm khi hết thời gian."""
@@ -34,7 +35,8 @@ DEFAULT_WEIGHTS = {
 class CaroAI:
     def __init__(self, player_id, depth, weights=None):
         """
-        Args: player_id: 1 (X) hoặc 2 (O)
+        Args:
+            player_id: 1 (X) hoặc 2 (O)
             depth:     độ sâu tìm kiếm tối đa
             weights:   dict trọng số (dùng DEFAULT_WEIGHTS nếu None)
         """
@@ -68,7 +70,7 @@ class CaroAI:
     # ──────────────────────────────────────────────────────────
     # Giao diện chính
     # ──────────────────────────────────────────────────────────
-    def get_move(self, board, mode, time_limit=8.0):
+    def get_move(self, board, mode="alpha_beta", time_limit= 20.0, log_path=None):
         """
         Trả về: (best_move, best_score, nodes_visited, time_taken)
         time_limit=None → bỏ qua iterative deepening, chạy thẳng depth.
@@ -83,22 +85,21 @@ class CaroAI:
         self.center    = board.size // 2
         self._ensure_center_weights(board.size)
 
-        # FIX #4 (tiếp): Tính center_weights ngay tại đây khi đã biết board.size thực tế.
-        size = board.size
-        ctr  = size // 2
-        cb   = self.weights.get("center_bonus", 40)
-        self.center_weights = [
-            [max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) for c in range(size)]
-            for r in range(size)
-        ]
-
         legal_moves = board.get_legal_moves()
         if not legal_moves:
             return None, 0, 0, 0
 
-        # get_legal_moves() đã sort theo priority (nước thắng=3, nước chặn=2, thường=0).
-        # KHÔNG sort lại theo center — làm vậy sẽ xóa mất ordering tốt đó.
-        # Center bonus đã được tính trong heuristic() nên không cần ưu tiên ở đây.
+        # TỐI ƯU ROOT: Đánh giá sơ bộ các nước đi tại Root để Alpha-Beta cắt nhánh tốt nhất có thể ngay từ đầu
+        if len(legal_moves) > 1:
+            move_evals = []
+            for m in legal_moves:
+                board.make_move(*m)
+                val = self.heuristic(board)
+                board.undo_move()
+                move_evals.append((m, val))
+            # Sắp xếp giảm dần để Alpha-Beta ưu tiên nhánh tốt nhất của máy lên trước
+            move_evals.sort(key=lambda x: x[1], reverse=True)
+            legal_moves = [x[0] for x in move_evals]
 
         # BƯỚC 0: Kiểm tra nước thắng ngay (depth=1)
         for move in legal_moves:
@@ -113,11 +114,12 @@ class CaroAI:
         final_best_move  = legal_moves[0]
         final_best_score = -math.inf
 
+        achieved_depth = 0
         root_beta = math.inf
 
         # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
         # Sửa: Chỉ dùng Depth chẵn để tránh Horizon Effect (2, 4)
-        search_range = [self.depth] if self.time_limit is None else range(2, self.depth, 2)
+        search_range = [self.depth] if self.time_limit is None else range(1, self.depth + 1)
 
         for current_depth in search_range:
             depth_best_move  = None
@@ -131,10 +133,11 @@ class CaroAI:
                         raise SearchTimeout()
 
                     board.make_move(*move)
+                    # Đoạn code cũ trong get_move
                     if mode == "minimax":
                         score = self.minimax(board, current_depth - 1, False, ply=1)
                     else:
-                        score = self.alpha_beta(board, current_depth - 1, alpha, root_beta, False, ply=1, use_pvs=(mode == "alphabeta"))
+                        score = self.alpha_beta(board, current_depth - 1, alpha, root_beta, False, ply=1, use_pvs=(mode == "alpha_beta"))
                     board.undo_move()
 
                     if score > depth_best_score:
@@ -147,6 +150,7 @@ class CaroAI:
                 # [QUAN TRỌNG] Chỉ cập nhật kết quả cuối cùng khi đã hoàn thành trọn vẹn độ sâu này
                 final_best_move  = depth_best_move
                 final_best_score = depth_best_score
+                achieved_depth = current_depth
 
                 # Move ordering: đưa nước tốt nhất của độ sâu vừa hoàn thành lên đầu cho lần lặp kế tiếp
                 if final_best_move in legal_moves:
@@ -160,6 +164,16 @@ class CaroAI:
                 break
 
         duration = time.time() - self.start_time
+
+        # Ghi log vào file moves.csv (chung cho cả Human và AI)
+        if log_path:
+            try:
+                log_ai_move(log_path, [
+                    'X' if self.player_id == 1 else 'O', str(final_best_move),
+                    final_best_score, self.nodes_visited, round(duration, 4), achieved_depth
+                ])
+            except: pass
+
         return final_best_move, final_best_score, self.nodes_visited, duration
 
     def _check_timeout(self):
@@ -168,12 +182,8 @@ class CaroAI:
             if self.time_limit is not None and time.time() - self.start_time > self.time_limit:
                 raise SearchTimeout()
 
-    # ──────────────────────────────────────────────────────────
     # Alpha-Beta
-    # ──────────────────────────────────────────────────────────
-    # ──────────────────────────────────────────────────────────
-    # Alpha-Beta 
-    # ──────────────────────────────────────────────────────────
+    # Alpha-Beta (Đã tối ưu: Move Ordering với TT-Move)
     def alpha_beta(self, board, depth, alpha, beta, is_maximizing, ply=0, use_pvs=True):
         self.nodes_visited += 1
 
