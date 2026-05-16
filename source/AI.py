@@ -56,6 +56,11 @@ class CaroAI:
         self.time_limit        = 0
         self.transposition_table = {}
 
+    def reset(self):
+        """Xóa cache và trạng thái tìm kiếm cho ván mới."""
+        self.transposition_table = {}
+        self.nodes_visited = 0
+
     def _ensure_center_weights(self, size):
         if self._center_weights_size == size:
             return
@@ -78,7 +83,6 @@ class CaroAI:
         self.nodes_visited       = 0
         self.start_time          = time.time()
         self.time_limit          = time_limit
-        self.transposition_table = {}
 
         self.player_id = board.current_player
         self.opp_id    = 3 - self.player_id
@@ -139,7 +143,8 @@ class CaroAI:
 
         # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
         # Sửa: Chỉ dùng Depth chẵn để tránh Horizon Effect (2, 4)
-        search_range = [self.depth] if self.time_limit is None else range(1, self.depth + 1)
+        # Sử dụng bước nhảy 2 để đảm bảo kết thúc ở các ply chẵn, giúp heuristic ổn định hơn
+        search_range = [self.depth] if self.time_limit is None else range(2, self.depth + 1, 2)
 
         for current_depth in search_range:
             depth_best_move  = None

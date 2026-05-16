@@ -98,8 +98,8 @@ class Board:
             return self.OPEN2_WIN_VAL if is_open else self.HALF2_WIN_VAL
         return 10 # count == 1
 
-    def _compute_score_delta(self, row, col, player) -> int:
-        opp  = 3 - player
+    def _compute_score_delta(self, row, col, player_moving) -> int:
+        opp  = 3 - player_moving
         delta = 0
         wc    = self.win_condition
         size  = self.size
@@ -138,20 +138,20 @@ class Board:
                     b_s = (line_vals[start-1] == other or line_vals[start-1] == -1)
                     b_e = (line_vals[end] == other or line_vals[end] == -1)
 
-                    if player == p_idx: # Tăng điểm cho quân mình
-                        s_before = self._get_window_score(cnt, 0, b_s, b_e, is_ai)
-                        s_after  = self._get_window_score(cnt + 1, 0, b_s, b_e, is_ai)
-                    else: # Chặn điểm của đối thủ (đối thủ đang có quân trong window này)
+                    if player_moving == p_idx:
+                        s_before = self._get_window_score(cnt, 0, b_s, b_e, True)
+                        s_after  = self._get_window_score(cnt + 1, 0, b_s, b_e, True)
+                    else:
                         if cnt == 0: continue
-                        s_before = self._get_window_score(cnt, 0, b_s, b_e, is_ai)
+                        s_before = self._get_window_score(cnt, 0, b_s, b_e, True)
                         s_after  = 0
                     
                     wd = s_after - s_before
-                    delta += wd if is_ai else -wd
+                    delta += wd * multiplier
 
         ctr = size >> 1
         center_val = max(0, 40 - (abs(row-ctr) + abs(col-ctr)) * 3)
-        delta += center_val if player == 2 else -center_val
+        delta += center_val if player_moving == 2 else -center_val
         return delta
 
     def make_move(self, row, col) -> bool:

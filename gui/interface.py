@@ -739,6 +739,7 @@ class GameScreen:
         if self.mode == "Ai":
             self.ai_thinking = False
             self.ai_result   = None
+            self.ai.reset()
         self.setting.close()
         self.win_screen.hide()
         if self.mode == "Ai" and self.ai_side == PLAYER_X:
