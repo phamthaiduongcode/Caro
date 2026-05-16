@@ -33,22 +33,33 @@ class CaroAI:
 
         # Trường hợp 1: AI được đi nước đầu tiên (AI là X)
         if moves_made == 0:
-            return (ctr, ctr)
+            score = board.evaluate_position(ctr, ctr, self.player_id)
+            return (ctr, ctr), score
 
         # Trường hợp 2: AI đi nước thứ 2 (AI là O, đáp trả nước đầu của X)
         if moves_made == 1:
             x_row, x_col, _ = board.history[0]
-            # 8 vị trí bao quanh quân X vừa đánh
-            standard_replies = [
-                (x_row - 1, x_col), (x_row + 1, x_col), (x_row, x_col - 1), (x_row, x_col + 1),       # Direct
-                (x_row - 1, x_col - 1), (x_row - 1, x_col + 1), (x_row + 1, x_col - 1), (x_row + 1, x_col + 1) # Indirect
+            
+            # Chiến thuật: Ưu tiên chặn chéo (Indirect) trước vì tạo cấu trúc linh hoạt hơn
+            diagonal_replies = [
+                (x_row-1, x_col-1), (x_row-1, x_col+1),
+                (x_row+1, x_col-1), (x_row+1, x_col+1)
             ]
-            # Lọc ra các ô hợp lệ (không bị lọt ra ngoài bàn cờ)
-            valid_replies = [(r, c) for r, c in standard_replies 
-                             if 0 <= r < board.size and 0 <= c < board.size]
-            if valid_replies:
-                return random.choice(valid_replies)
-        return None
+            straight_replies = [
+                (x_row-1, x_col), (x_row+1, x_col),
+                (x_row, x_col-1), (x_row, x_col+1)
+            ]
+            
+            ctr = board.size // 2
+            # Lọc các ô hợp lệ
+            valid_diag = [(r, c) for r, c in diagonal_replies if 0 <= r < board.size and 0 <= c < board.size]
+            
+            if valid_diag:
+                # Chọn ô chéo gần tâm nhất (ví dụ: nếu X ở 13,13 thì 12,12 gần tâm hơn 14,14)
+                best = min(valid_diag, key=lambda p: abs(p[0] - ctr) + abs(p[1] - ctr))
+                return best, board.evaluate_position(best[0], best[1], self.player_id)
+
+        return None, 0
 
     # ──────────────────────────────────────────────────────────
     # Giao diện chính
@@ -70,17 +81,17 @@ class CaroAI:
         self.opp_id    = 3 - self.player_id
 
         # 1. KIỂM TRA OPENING BOOK TRƯỚC TIÊN
-        opening_move = self._get_opening_move(board)
+        opening_move, opening_score = self._get_opening_move(board)
         if opening_move is not None:
             duration = time.time() - self.start_time
             if log_path:
                 try:
                     log_ai_move(log_path, [
                         'X' if self.player_id == 1 else 'O', str(opening_move),
-                        0, 0, round(duration, 4), 0
+                        opening_score, 1, round(duration, 4), 1
                     ])
                 except: pass
-            return opening_move, 0, 0, duration
+            return opening_move, opening_score, 0, duration
 
         legal_moves = board.get_legal_moves()
         if not legal_moves:
@@ -187,8 +198,12 @@ class CaroAI:
             if self.time_limit is not None and time.time() - self.start_time > self.time_limit:
                 raise SearchTimeout()
 
+    # ──────────────────────────────────────────────────────────
     # Alpha-Beta
+    # ──────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
     # Alpha-Beta (Đã tối ưu: Move Ordering với TT-Move)
+    # ──────────────────────────────────────────────────────────
     def alpha_beta(self, board, depth, alpha, beta, is_maximizing, ply=0, use_pvs=True):
         self.nodes_visited += 1
 
