@@ -33,8 +33,6 @@ class SoundManager:
         self._load("btn_click",  "sound_button.mp3",  volume=1)
         self._load("place_x",    "sound_tick.wav",    volume=1.0)
         self._load("place_o",    "sound_tick.wav",    volume=1.0)
-        
-        print("Loaded keys:", list(self._sfx.keys()))
 
     # ── BGM ───────────────────────────────────────────────────────────────────
     def play_bgm(self, filename: str = "sound_background.mp3", volume: float = 1):
