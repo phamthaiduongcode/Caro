@@ -117,7 +117,7 @@ class CaroAI:
 
         # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
         # Sửa: Chỉ dùng Depth chẵn để tránh Horizon Effect (2, 4)
-        search_range = [self.depth] if self.time_limit is None else range(2, self.depth + 1, 2)
+        search_range = [self.depth] if self.time_limit is None else range(2, self.depth, 2)
 
         for current_depth in search_range:
             depth_best_move  = None
