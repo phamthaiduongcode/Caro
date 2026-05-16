@@ -1,5 +1,8 @@
 import random
 
+# Chia sẻ bảng Zobrist để tránh khởi tạo lại tốn kém khi copy board (đặc biệt quan trọng với 15x15)
+_ZOBRIST_CACHE = {}
+
 class Board:
     DIRECTIONS = [(0, 1), (1, 0), (1, 1), (1, -1)]
     _NEIGHBOR_OFFSETS = [(dr, dc) for dr in range(-2, 3) for dc in range(-2, 3) if dr or dc]
@@ -23,8 +26,14 @@ class Board:
         self.history = []
         self.current_score = 0
 
-        self.zobrist_table = [[[random.getrandbits(64) for _ in range(3)]
-                               for _ in range(size)] for _ in range(size)]
+        # Sử dụng cache cho zobrist_table để tối ưu tốc độ khởi tạo và copy()
+        if size not in _ZOBRIST_CACHE:
+            _ZOBRIST_CACHE[size] = [
+                [[random.getrandbits(64) for _ in range(3)]
+                 for _ in range(size)] for _ in range(size)
+            ]
+        self.zobrist_table = _ZOBRIST_CACHE[size]
+        
         self.zobrist_side = random.getrandbits(64)
         self.current_hash = 0
         for r in range(size):
@@ -97,37 +106,37 @@ class Board:
         grid  = self.grid
 
         for dr, dc in self.DIRECTIONS:
-            # "Phóng tia": Lấy dữ liệu 1 đường thẳng duy nhất chứa ô vừa đánh
-            # wc=4 -> lấy 4 ô mỗi phía để bao quát mọi cửa sổ 4 ô chứa điểm này
-            line = []
+            # Tối ưu: Lấy giá trị các ô xung quanh vào 1 list duy nhất để giảm slicing/allocation
+            line_vals = []
             for i in range(-wc, wc + 1):
                 r, c = row + i*dr, col + i*dc
                 if 0 <= r < size and 0 <= c < size:
-                    line.append(grid[r*size + c])
+                    line_vals.append(grid[r*size + c])
                 else:
-                    line.append(-1) # Biên bàn cờ tính là chặn
+                    line_vals.append(-1) # Biên bàn cờ tính là chặn
 
-            # Quét các cửa sổ kích thước wc đi qua điểm trung tâm (index wc trong line)
+            # Quét các cửa sổ chứa ô vừa đánh (index wc trong line_vals)
             for start in range(1, wc + 1):
                 end = start + wc
-                window = line[start:end]
                 
-                p1_cnt = window.count(1)
-                p2_cnt = window.count(2)
-
-                # Nếu cửa sổ hỗn tạp (có cả X và O) -> 0 điểm, không cần tính delta
-                if p1_cnt > 0 and p2_cnt > 0: continue
+                p1_cnt = 0
+                p2_cnt = 0
+                for k in range(start, end):
+                    val = line_vals[k]
+                    if val == 1: p1_cnt += 1
+                    elif val == 2: p2_cnt += 1
+                
+                if p1_cnt > 0 and p2_cnt > 0:
+                    continue
                 
                 for p_idx in (1, 2):
-                    if (p_idx == 1 and p2_cnt > 0) or (p_idx == 2 and p1_cnt > 0): continue
+                    if (p_idx == 1 and p2_cnt > 0) or (p_idx == 2 and p1_cnt > 0):
+                        continue
                     
-                    other = 3 - p_idx
-                    is_ai = (p_idx == 2)
+                    other, is_ai = 3 - p_idx, (p_idx == 2)
                     cnt = p1_cnt if p_idx == 1 else p2_cnt
-                    
-                    # Check chặn bằng dữ liệu từ 'line' đã fetch
-                    b_s = (line[start-1] == other or line[start-1] == -1)
-                    b_e = (line[end] == other or line[end] == -1)
+                    b_s = (line_vals[start-1] == other or line_vals[start-1] == -1)
+                    b_e = (line_vals[end] == other or line_vals[end] == -1)
 
                     if player == p_idx: # Tăng điểm cho quân mình
                         s_before = self._get_window_score(cnt, 0, b_s, b_e, is_ai)
@@ -157,7 +166,8 @@ class Board:
         self.current_hash ^= zt[row][col][self.current_player]
         self.current_hash ^= self.zobrist_side
         self.current_score += delta
-        self.history.append((row, col, delta))
+        # TỐI ƯU: Lưu old_refs để khôi phục trong undo_move mà không cần tính lại neighbor
+        self.history.append((row, col, delta, self._cand_refs[idx]))
         self.current_player = 3 - self.current_player
         self._cand_refs[idx] = 0
         self._candidates.discard((row, col))
@@ -168,7 +178,7 @@ class Board:
         if not self.history:
             return False
 
-        row, col, delta = self.history.pop()
+        row, col, delta, old_refs = self.history.pop()
         idx  = row * self.size + col
         zt   = self.zobrist_table
         self.current_hash ^= zt[row][col][self.grid[idx]]
@@ -178,20 +188,16 @@ class Board:
         self.current_score -= delta
         self.current_player = 3 - self.current_player
         self._remove_neighbors(row, col)
-        size = self.size
-        grid = self.grid
-        ref  = sum(1 for dr, dc in self._NEIGHBOR_OFFSETS
-                   if 0 <= row+dr < size and 0 <= col+dc < size
-                   and grid[(row+dr)*size + col+dc] != 0)
-        if ref > 0:
-            self._cand_refs[idx] = ref
+        if old_refs > 0:
+            self._cand_refs[idx] = old_refs
             self._candidates.add((row, col))
         return True
 
     def check_win(self) -> int:
         if not self.history:
             return 0
-        last_r, last_c, _ = self.history[-1]
+        # Cập nhật để nhận đủ 4 giá trị (row, col, delta, old_refs) hoặc chỉ lấy 2 giá trị đầu
+        last_r, last_c = self.history[-1][:2]
         last_player = self.grid[last_r * self.size + last_c]
         if self._check_at(last_r, last_c):
             return last_player
@@ -235,32 +241,35 @@ class Board:
         if not self._candidates:
             return []
 
-        cur  = self.current_player
-        opp  = 3 - cur
-        ctr  = self.size >> 1
+        cur, opp = self.current_player, 3 - self.current_player
         size = self.size
+        ctr = size // 2
+        # Tăng số lượng nước xem xét cho bàn lớn (15x15) để không bỏ sót các đường xa
+        max_moves = 20 if size <= 9 else 32
 
-        max_moves = min(20 + (self.size - 9), 28)
-
-        wins = []; blocks = []; normal = []
+        wins, blocks, normal_with_scores = [], [], []
         for pos in self._candidates:
             r, c = pos
             if self.fast_check_win(r, c, cur):
                 wins.append(pos)
-            elif self.fast_check_win(r, c, opp):
+                continue
+            if self.fast_check_win(r, c, opp):
                 blocks.append(pos)
-            else:
-                normal.append(pos)
+                continue
+            
+            # Ưu tiên các nước gần trung tâm (giúp Alpha-Beta tìm thấy nước tốt nhanh hơn)
+            dist_score = (size - abs(r - ctr) - abs(c - ctr))
+            normal_with_scores.append((pos, dist_score))
 
         if wins:
             return wins
 
-        remaining = max_moves - len(blocks)
-        if remaining > 0 and normal:
-            normal.sort(key=lambda p: -(size - abs(p[0]-ctr) - abs(p[1]-ctr)))
-            normal = normal[:remaining]
-
-        return blocks + normal
+        # Sắp xếp các nước đi bình thường theo độ ưu tiên giảm dần
+        normal_with_scores.sort(key=lambda x: x[1], reverse=True)
+        normal = [x[0] for x in normal_with_scores]
+        
+        result = blocks + normal
+        return result[:max_moves]
 
     def evaluate_position(self, r, c, player):
         """Đưa evaluate_position về cùng logic 'Phóng tia' để đảm bảo tính nhất quán."""

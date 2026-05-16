@@ -89,9 +89,17 @@ class CaroAI:
         if not legal_moves:
             return None, 0, 0, 0
 
-        # get_legal_moves() đã sort theo priority (nước thắng=3, nước chặn=2, thường=0).
-        # KHÔNG sort lại theo center — làm vậy sẽ xóa mất ordering tốt đó.
-        # Center bonus đã được tính trong heuristic() nên không cần ưu tiên ở đây.
+        # TỐI ƯU ROOT: Đánh giá sơ bộ các nước đi tại Root để Alpha-Beta cắt nhánh tốt nhất có thể ngay từ đầu
+        if len(legal_moves) > 1:
+            move_evals = []
+            for m in legal_moves:
+                board.make_move(*m)
+                val = self.heuristic(board)
+                board.undo_move()
+                move_evals.append((m, val))
+            # Sắp xếp giảm dần để Alpha-Beta ưu tiên nhánh tốt nhất của máy lên trước
+            move_evals.sort(key=lambda x: x[1], reverse=True)
+            legal_moves = [x[0] for x in move_evals]
 
         # BƯỚC 0: Kiểm tra nước thắng ngay (depth=1)
         for move in legal_moves:
