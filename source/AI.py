@@ -89,23 +89,51 @@ class CaroAI:
         self.center    = board.size // 2
         self._ensure_center_weights(board.size)
 
-        legal_moves = board.get_legal_moves()
+        # ĐỔI THÀNH limit=False TẠI ROOT ĐỂ KHÔNG BỎ SÓT NƯỚC Ở GÓC
+        legal_moves = board.get_legal_moves(limit=False) 
         if not legal_moves:
             return None, 0, 0, 0
 
-        # get_legal_moves() đã sort theo priority (nước thắng=3, nước chặn=2, thường=0).
-        # KHÔNG sort lại theo center — làm vậy sẽ xóa mất ordering tốt đó.
-        # Center bonus đã được tính trong heuristic() nên không cần ưu tiên ở đây.
+        # TỐI ƯU ROOT: Đánh giá sơ bộ TOÀN BỘ nước đi
+        if len(legal_moves) > 1:
+            move_evals = []
+            for m in legal_moves:
+                board.make_move(*m)
+                val = self.heuristic(board)
+                board.undo_move()
+                move_evals.append((m, val))
+                
+            move_evals.sort(key=lambda x: x[1], reverse=True)
+            
+            # Cắt lấy top N nước TỐT NHẤT theo điểm thực tế chứ không phải theo vị trí trung tâm
+            top_n = 20 if board.size <= 9 else 40
+            legal_moves = [x[0] for x in move_evals][:top_n]
 
         # BƯỚC 0: Kiểm tra nước thắng ngay (depth=1)
         for move in legal_moves:
             if board.fast_check_win(move[0], move[1], self.player_id):
-                return move, 1_000_000, 1, time.time() - self.start_time # ply=0 win
+                duration = time.time() - self.start_time
+                if log_path:
+                    try:
+                        log_ai_move(log_path, [
+                            'X' if self.player_id == 1 else 'O', str(move),
+                            1_000_000, 1, round(duration, 4), 1
+                        ])
+                    except: pass
+                return move, 1_000_000, 1, duration # ply=0 win
 
         # BƯỚC 0.5: Chặn đối thủ thắng ngay (Bắt buộc phải chặn trước khi nghĩ đến Fork)
         for move in legal_moves:
             if board.fast_check_win(move[0], move[1], self.opp_id):
-                return move, 950_000, 1, time.time() - self.start_time
+                duration = time.time() - self.start_time
+                if log_path:
+                    try:
+                        log_ai_move(log_path, [
+                            'X' if self.player_id == 1 else 'O', str(move),
+                            950_000, 1, round(duration, 4), 1
+                        ])
+                    except: pass
+                return move, 950_000, 1, duration
 
         final_best_move  = legal_moves[0]
         final_best_score = -math.inf
