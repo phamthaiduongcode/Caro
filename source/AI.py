@@ -1,5 +1,6 @@
 import math
 import time
+from source.utils import log_ai_move
 
 class SearchTimeout(Exception):
     """Ngoại lệ tùy chỉnh để dừng tìm kiếm khi hết thời gian."""
@@ -69,7 +70,7 @@ class CaroAI:
     # ──────────────────────────────────────────────────────────
     # Giao diện chính
     # ──────────────────────────────────────────────────────────
-    def get_move(self, board, mode="alphabeta", time_limit=8.0):
+    def get_move(self, board, mode="alpha_beta", time_limit= 20.0, log_path=None):
         """
         Trả về: (best_move, best_score, nodes_visited, time_taken)
         time_limit=None → bỏ qua iterative deepening, chạy thẳng depth.
@@ -105,6 +106,7 @@ class CaroAI:
         final_best_move  = legal_moves[0]
         final_best_score = -math.inf
 
+        achieved_depth = 0
         root_beta = math.inf
 
         # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
@@ -127,7 +129,7 @@ class CaroAI:
                     if mode == "minimax":
                         score = self.minimax(board, current_depth - 1, False, ply=1)
                     else:
-                        score = self.alpha_beta(board, current_depth - 1, alpha, root_beta, False, ply=1, use_pvs=(mode == "alphabeta"))
+                        score = self.alpha_beta(board, current_depth - 1, alpha, root_beta, False, ply=1, use_pvs=(mode == "alpha_beta"))
                     board.undo_move()
 
                     if score > depth_best_score:
@@ -140,6 +142,7 @@ class CaroAI:
                 # [QUAN TRỌNG] Chỉ cập nhật kết quả cuối cùng khi đã hoàn thành trọn vẹn độ sâu này
                 final_best_move  = depth_best_move
                 final_best_score = depth_best_score
+                achieved_depth = current_depth
 
                 # Move ordering: đưa nước tốt nhất của độ sâu vừa hoàn thành lên đầu cho lần lặp kế tiếp
                 if final_best_move in legal_moves:
@@ -153,6 +156,16 @@ class CaroAI:
                 break
 
         duration = time.time() - self.start_time
+
+        # Ghi log vào file moves.csv (chung cho cả Human và AI)
+        if log_path:
+            try:
+                log_ai_move(log_path, [
+                    'X' if self.player_id == 1 else 'O', str(final_best_move),
+                    final_best_score, self.nodes_visited, round(duration, 4), achieved_depth
+                ])
+            except: pass
+
         return final_best_move, final_best_score, self.nodes_visited, duration
 
     def _check_timeout(self):

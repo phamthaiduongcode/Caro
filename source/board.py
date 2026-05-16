@@ -73,7 +73,7 @@ class Board:
         """Hàm lượng giá cửa sổ thông minh: Phân biệt Open/Half/Blocked."""
         if p_cnt > 0 and o_cnt > 0: return 0
         
-        count = p_cnt if is_ai else o_cnt
+        count = p_cnt
         if count == 0: return 0
         if count >= self.win_condition: return self.WIN_SCORE
 
@@ -240,6 +240,8 @@ class Board:
         ctr  = self.size >> 1
         size = self.size
 
+        max_moves = min(20 + (self.size - 9), 28)
+
         wins = []; blocks = []; normal = []
         for pos in self._candidates:
             r, c = pos
@@ -253,7 +255,7 @@ class Board:
         if wins:
             return wins
 
-        remaining = self.MAX_MOVES - len(blocks)
+        remaining = max_moves - len(blocks)
         if remaining > 0 and normal:
             normal.sort(key=lambda p: -(size - abs(p[0]-ctr) - abs(p[1]-ctr)))
             normal = normal[:remaining]

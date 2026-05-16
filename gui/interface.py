@@ -3,12 +3,14 @@ import pygame
 import os
 import sys
 import threading
+import time
 
 # ─── Import source logic ──
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 from source.board import Board
 from source.AI import CaroAI
+from source.utils import log_game_result, log_ai_move
 from gui.button import Button, ImageButton
 from gui.sound_manager import SoundManager
 
@@ -28,7 +30,7 @@ STATE_GAME         = "game"
 PLAYER_X = 1
 PLAYER_O = 2
 
-AI_TIME_LIMIT = 10
+AI_TIME_LIMIT = 5
 
 # Level → depth mapping
 LEVEL_DEPTH = {
@@ -642,11 +644,15 @@ class GameScreen:
 
         self.winner    = None
         self.game_over = False
+        self.start_time = time.time()
 
         self.token_x    = load_img("token_x.png", (self.CELL - 6, self.CELL - 6))
         self.token_o    = load_img("token_o.png", (self.CELL - 6, self.CELL - 6))
         self.turn_x_img = load_img("turn_X.png",  (220, 55))
         self.turn_o_img = load_img("turn_o.png",  (220, 55))
+
+        # Tạo đường dẫn log tuyệt đối dựa trên thư mục gốc dự án
+        self.move_log_path = self._generate_log_path()
 
         self.img_score_raw = pygame.image.load(
             os.path.join(ASSETS, "score.png")).convert_alpha()
@@ -711,10 +717,25 @@ class GameScreen:
             return by // self.CELL, bx // self.CELL
         return None
 
+    def _generate_log_path(self):
+        """Tự động tìm số thứ tự ván đấu tiếp theo để lưu vào file riêng."""
+        i = 1
+        while True:
+            filename = f"van_dau_{self.board_size}_{i}.csv"
+            path = os.path.join(_ROOT, "logs", filename)
+            if not os.path.exists(path):
+                return path
+            i += 1
+
     def restart(self):
         self.board_obj = Board(size=self.board_size, win_condition=WIN_COND)
         self.winner    = None
         self.game_over = False
+        
+        # Khi restart, tạo một file log mới cho ván mới
+        self.move_log_path = self._generate_log_path()
+        
+        self.start_time = time.time()
         if self.mode == "Ai":
             self.ai_thinking = False
             self.ai_result   = None
@@ -723,14 +744,34 @@ class GameScreen:
         if self.mode == "Ai" and self.ai_side == PLAYER_X:
             self._trigger_ai()
 
-    def _add_score(self, winner):
-        if winner in self.score:
+    def _log_result(self, winner):
+        if winner and winner in self.score:
             self.score[winner] += 1
+            
+        # Xác định tên người thắng
+        if winner == -1:
+            winner_name = "Hòa"
+        else:
+            p_sym = "X" if winner == PLAYER_X else "O"
+            if self.mode == "Ai":
+                side = "Người" if winner == self.human_side else "Máy"
+                winner_name = f"{side} ({p_sym})"
+            else:
+                winner_name = f"Người chơi {p_sym}"
+        
+        moves_count = len(self.board_obj.history)
+        total_duration = round(time.time() - self.start_time, 2)
+        
+        # Ghi dòng tổng kết vào cuối file moves.csv
+        # Format: [Trạng thái, Tên người thắng, Tổng số nước, 0, Tổng thời gian, 0]
+        summary_data = ["KẾT THÚC", winner_name, moves_count, 0, total_duration, 0]
+        log_ai_move(self.move_log_path, summary_data)
 
     def _run_ai(self, board_copy):
         move, _, _, _ = self.ai.get_move(board_copy,
                                          mode=self.algo,
-                                         time_limit=AI_TIME_LIMIT)
+                                         time_limit=AI_TIME_LIMIT,
+                                         log_path=self.move_log_path)
         self.ai_result = move
 
     def _trigger_ai(self):
@@ -757,23 +798,31 @@ class GameScreen:
         if result in (PLAYER_X, PLAYER_O):
             self.winner    = result
             self.game_over = True
-            self._add_score(result)
+            self._log_result(result)
             self.win_screen.show(result)
         elif result == -1:
             self.game_over = True
+            self._log_result(-1)
 
     def _place_move(self, row, col):
+        moving_player = self.board_obj.current_player
         if not self.board_obj.make_move(row, col):
             return False
+
+        # Ghi log nước đi của con người
+        p_label = 'X' if moving_player == PLAYER_X else 'O'
+        log_ai_move(self.move_log_path, [p_label, f"({row}, {col})", 0, 0, 0, 0])
+
         SoundManager().play("place_x")
         result = self.board_obj.check_win()
         if result in (PLAYER_X, PLAYER_O):
             self.winner    = result
             self.game_over = True
-            self._add_score(result)
+            self._log_result(result)
             self.win_screen.show(result)
         elif result == -1:
             self.game_over = True
+            self._log_result(-1)
         return True
 
     def _undo(self):
@@ -805,7 +854,7 @@ class GameScreen:
             winner = PLAYER_O if self.current == PLAYER_X else PLAYER_X
             self.winner    = winner
             self.game_over = True
-            self._add_score(winner)
+            self._log_result(winner)
             self.setting.close()
             self.win_screen.show(winner)
             return None
