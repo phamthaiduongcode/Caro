@@ -7,55 +7,21 @@ class SearchTimeout(Exception):
     """Ngoại lệ tùy chỉnh để dừng tìm kiếm khi hết thời gian."""
     pass
 
-
-# ─────────────────────────────────────────────────────────────
-# Trọng số mặc định (baseline đã được căn chỉnh tay)
-# Đây là điểm khởi đầu cho GA training.
-# ─────────────────────────────────────────────────────────────
-DEFAULT_WEIGHTS = {
-    # Tấn công (AI)
-    "open3":        250_000,   # _XXX_  → Thắng chắc trong luật 4
-    "half3":        100_000,   # XXX_   → Buộc phải chặn ngay trong luật 4
-    "broken4":      100_000,   # XX_X   → Nguy hiểm tương đương half3
-    "open2":          5_000,   # _XX_
-    "half2":          1_000,   # XX_
-    "broken3":       10_000,   # X_X_
-    "open1":             10,   # _X_
-
-    # Hệ số phòng thủ: nhân vào điểm của đối thủ
-    # > 1.0: thiên về phòng thủ; < 1.0: thiên về tấn công
-    # Không có luật chặn 2 đầu → open3 của địch rất nguy hiểm → nên > 1.0
-    "defense_mult":    1.20,
-
-    # Bonus vị trí: cộng thêm cho quân gần tâm
-    "center_bonus":      40,
-    "fork_bonus":   500_000,   # 2 open3 cùng lúc = gần như thắng chắc
-}
-
-
 class CaroAI:
-    def __init__(self, player_id, depth, weights=None):
+    def __init__(self, player_id, depth):
         """
         Args:
             player_id: 1 (X) hoặc 2 (O)
             depth:     độ sâu tìm kiếm tối đa
-            weights:   dict trọng số (dùng DEFAULT_WEIGHTS nếu None)
         """
         self.player_id = player_id
         self.opp_id    = 3 - player_id
         self.depth     = depth
-        self.weights = weights if weights is not None else dict(DEFAULT_WEIGHTS)
-
-        # ─── TỐI ƯU 3: center_weights được khởi tạo lazy theo board size ───
-        # Không hard-code size=9 nữa. Tính lại khi size thay đổi.
-        self._center_weights_size = None
-        self.center_weights = None
 
         self.nodes_visited     = 0
-        self.center            = 0
         self.start_time        = 0
         self.time_limit        = 0
-        self.transposition_table = {}
+        self.transposition_table = {}  # Khởi tạo một lần duy nhất tại __init__
 
     def _get_opening_move(self, board):
         """
@@ -84,17 +50,6 @@ class CaroAI:
                 return random.choice(valid_replies)
         return None
 
-    def _ensure_center_weights(self, size):
-        if self._center_weights_size == size:
-            return
-        ctr = size // 2
-        cb  = self.weights.get("center_bonus", 40)
-        self.center_weights = [
-            [max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) for c in range(size)]
-            for r in range(size)
-        ]
-        self._center_weights_size = size
-
     # ──────────────────────────────────────────────────────────
     # Giao diện chính
     # ──────────────────────────────────────────────────────────
@@ -106,12 +61,13 @@ class CaroAI:
         self.nodes_visited       = 0
         self.start_time          = time.time()
         self.time_limit          = time_limit
-        self.transposition_table = {}
+        
+        # Kiểm tra kích thước TT để tránh tràn RAM (giới hạn 1 triệu entry)
+        if len(self.transposition_table) > 1_000_000:
+            self.transposition_table.clear()
 
         self.player_id = board.current_player
         self.opp_id    = 3 - self.player_id
-        self.center    = board.size // 2
-        self._ensure_center_weights(board.size)
 
         # 1. KIỂM TRA OPENING BOOK TRƯỚC TIÊN
         opening_move = self._get_opening_move(board)
@@ -334,8 +290,11 @@ class CaroAI:
                 else "LOWER" if best_score >= beta_orig
                 else "EXACT")
                 
-        # [MỚI] Lưu best_move_found vào TT thay vì để None
-        self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
+        # [SỬA LỖI] Chỉ ghi đè nếu kết quả mới có độ sâu tính toán lớn hơn hoặc bằng kết quả cũ
+        if (board_hash not in self.transposition_table or 
+            depth >= self.transposition_table[board_hash][0]):
+            self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
+            
         return best_score
     # ──────────────────────────────────────────────────────────
     # Minimax thuần túy

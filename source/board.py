@@ -9,9 +9,9 @@ class Board:
     # Half3 = 100k
     WIN_SCORE = 1_000_000
     OPEN3_WIN_VAL = 125_000   # _XXX_ tạo ra 2 cửa sổ => 250,000
-    HALF3_WIN_VAL = 40_000    # OXXX_ hoặc _XXXO => chỉ nên nhận ~80,000 - 100,000 tổng
+    HALF3_WIN_VAL = 100_000
     OPEN2_WIN_VAL = 2_500
-    HALF2_WIN_VAL = 500
+    HALF2_WIN_VAL = 1_000
 
     def __init__(self, size=9, win_condition=4):
         if size < 9:
