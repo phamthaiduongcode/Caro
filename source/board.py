@@ -235,7 +235,7 @@ class Board:
 
     MAX_MOVES = 20
 
-    def get_legal_moves(self) -> list:
+    def get_legal_moves(self, limit=True) -> list:
         if not self.history:
             return [(self.size // 2, self.size // 2)]
         if not self._candidates:
@@ -244,10 +244,15 @@ class Board:
         cur, opp = self.current_player, 3 - self.current_player
         size = self.size
         ctr = size // 2
-        # Tăng số lượng nước xem xét cho bàn lớn (15x15) để không bỏ sót các đường xa
-        max_moves = 20 if size <= 9 else 32
+        # Giữ khoảng 40 nước đi cho bàn cờ lớn để an toàn
+        max_moves = 20 if size <= 9 else 40
 
         wins, blocks, normal_with_scores = [], [], []
+        
+        # Trích xuất tọa độ 2 nước cờ vừa được đánh gần nhất (Điểm nóng)
+        last_r, last_c = self.history[-1][:2]
+        prev_r, prev_c = self.history[-2][:2] if len(self.history) >= 2 else (last_r, last_c)
+
         for pos in self._candidates:
             r, c = pos
             if self.fast_check_win(r, c, cur):
@@ -257,9 +262,22 @@ class Board:
                 blocks.append(pos)
                 continue
             
-            # Ưu tiên các nước gần trung tâm (giúp Alpha-Beta tìm thấy nước tốt nhanh hơn)
-            dist_score = (size - abs(r - ctr) - abs(c - ctr))
-            normal_with_scores.append((pos, dist_score))
+            # --- TỐI ƯU LẠI MOVE ORDERING ---
+            # 1. Khoảng cách tới vùng giao tranh (nước vừa đánh của mình & đối thủ)
+            dist_to_last = max(abs(r - last_r), abs(c - last_c))
+            dist_to_prev = max(abs(r - prev_r), abs(c - prev_c))
+            min_dist_to_action = min(dist_to_last, dist_to_prev)
+            
+            # 2. Vị trí có nhiều quân lân cận (vùng đông quân)
+            refs = self._cand_refs[r * size + c]
+            
+            # 3. Khoảng cách tới trung tâm (chỉ làm tiêu chí phụ)
+            dist_to_center = abs(r - ctr) + abs(c - ctr)
+            
+            # Điểm: Càng sát "điểm nóng" điểm càng cao. Tính toán O(1) nên cực nhanh.
+            score = (15 - min_dist_to_action) * 100 + (refs * 10) - dist_to_center
+            
+            normal_with_scores.append((pos, score))
 
         if wins:
             return wins
@@ -269,6 +287,10 @@ class Board:
         normal = [x[0] for x in normal_with_scores]
         
         result = blocks + normal
+        
+        # Nếu đang ở Root Node (limit=False), không cắt bỏ để đánh giá toàn diện
+        if not limit:
+            return result
         return result[:max_moves]
 
     def evaluate_position(self, r, c, player):
