@@ -46,7 +46,36 @@ STATES = {
         (4, 2), (4, 6), 
         (2, 4), (6, 4)
         # Quân cờ tản mác khắp bàn, số lượng ô ứng viên (candidates) rất lớn.
+    ],
+    "7. Giao tranh o goc (Corner Case)": [
+        (0, 0), (1, 1), 
+        (0, 1), (1, 0), 
+        (0, 2), (2, 0), 
+        (1, 2)
+        # Giao tranh bị ép vào góc hẹp (0,0). Không gian mở rộng xung quanh bị giới hạn.
+    ],
+    "8. Bay doi / Fork (Tao 2 huong de doa)": [
+        (4, 4), (5, 5), 
+        (4, 5), (5, 4), 
+        (4, 3), (3, 5), 
+        (3, 4)
+        # Trạng thái một phe tạo ra "ngã 3" (bẫy đôi). Có nhiều hơn 1 đường thắng tiềm năng.
+    ],
+    "9. Chuoi phong thu lien hoan (Forced Blocks)": [
+        (4, 4), (4, 5), 
+        (3, 4), (2, 4), 
+        (5, 3), (6, 2), 
+        (5, 5), (6, 6)
+        # Một bên liên tục "chiếu" (tạo 3 quân liên tiếp), bên kia buộc phải chặn liên tục.
+    ],
+    "10. Cuc dien giang co phuc tap (Late Game)": [
+        (4, 4), (4, 5), (3, 4), (5, 4), 
+        (5, 5), (3, 3), (3, 5), (5, 3), 
+        (2, 4), (6, 4), (4, 2), (4, 6), 
+        (2, 2), (6, 6), (2, 6), (6, 2)
+        # Trạng thái "mạng nhện": Quân X và O đan xen dày đặc, không có ai ưu thế rõ ràng.
     ]
+
 }
 
 def run_benchmark():

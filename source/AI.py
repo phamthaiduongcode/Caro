@@ -187,12 +187,8 @@ class CaroAI:
             if self.time_limit is not None and time.time() - self.start_time > self.time_limit:
                 raise SearchTimeout()
 
-    # ──────────────────────────────────────────────────────────
     # Alpha-Beta
-    # ──────────────────────────────────────────────────────────
-    # ──────────────────────────────────────────────────────────
     # Alpha-Beta (Đã tối ưu: Move Ordering với TT-Move)
-    # ──────────────────────────────────────────────────────────
     def alpha_beta(self, board, depth, alpha, beta, is_maximizing, ply=0, use_pvs=True):
         self.nodes_visited += 1
 
