@@ -140,6 +140,40 @@ class Board:
                     wd = s_after - s_before
                     delta += wd if is_ai else -wd
 
+        # ─── FORK LOGIC ───
+        # 1. Fork bonus cho người vừa đánh
+        threat_dirs = 0
+        opp = 3 - player
+        opp_threat_dirs = 0
+
+        for dr, dc in self.DIRECTIONS:
+            cnt_p = 1
+            cnt_o = 1
+            for d in (1, -1):
+                # Check threat cho người vừa đánh
+                nr, nc = row + dr*d, col + dc*d
+                while 0 <= nr < size and 0 <= nc < size and grid[nr*size+nc] == player:
+                    cnt_p += 1
+                    nr += dr*d; nc += dc*d
+                
+                # Check threat mà đối thủ đáng lẽ có tại đây
+                nr, nc = row + dr*d, col + dc*d
+                while 0 <= nr < size and 0 <= nc < size and grid[nr*size+nc] == opp:
+                    cnt_o += 1
+                    nr += dr*d; nc += dc*d
+            
+            if cnt_p >= wc - 1: threat_dirs += 1
+            if cnt_o >= wc - 1: opp_threat_dirs += 1
+
+        if threat_dirs >= 2:
+            fork_bonus = 80_000  # Gần bằng HALF3 — rất nguy hiểm
+            delta += fork_bonus if player == 2 else -fork_bonus
+        
+        if opp_threat_dirs >= 2:
+            # Đánh vào đây CHẶN fork của đối thủ -> cực kỳ quan trọng
+            fork_block_bonus = 70_000
+            delta += fork_block_bonus if player == 2 else -fork_block_bonus
+
         ctr = size >> 1
         center_val = max(0, 40 - (abs(row-ctr) + abs(col-ctr)) * 3)
         delta += center_val if player == 2 else -center_val
@@ -227,6 +261,25 @@ class Board:
             if cnt >= wc: return True
         return False
 
+    def _is_fork_threat(self, r, c, player) -> bool:
+        """Kiểm tra nếu đánh vào (r,c) tạo ra >= 2 đe dọa Open/Half-3 cùng lúc."""
+        threat_count = 0
+        wc, size, grid = self.win_condition, self.size, self.grid
+        for dr, dc in self.DIRECTIONS:
+            cnt = 1
+            open_ends = 0
+            for d in (1, -1):
+                nr, nc = r + dr*d, c + dc*d
+                while 0 <= nr < size and 0 <= nc < size and grid[nr*size+nc] == player:
+                    cnt += 1; nr += dr*d; nc += dc*d
+                if 0 <= nr < size and 0 <= nc < size and grid[nr*size+nc] == 0:
+                    open_ends += 1
+            if cnt >= wc - 1 and open_ends >= 1:  # Half-3 hoặc Open-3
+                threat_count += 1
+            if threat_count >= 2:
+                return True
+        return False
+
     MAX_MOVES = 20
 
     def get_legal_moves(self) -> list:
@@ -243,20 +296,22 @@ class Board:
         # Tăng max_moves cho bàn 15x15. Bàn càng to, giới hạn càng nên rộng ra đôi chút.
         max_moves = min(20 + (self.size - 9) * 2, 40) # Cho tối đa 30-40 nước
 
-        wins = []; blocks = []; normal = []
+        wins = []; blocks = []; threats = []; normal = []
         for pos in self._candidates:
             r, c = pos
             if self.fast_check_win(r, c, cur):
                 wins.append(pos)
             elif self.fast_check_win(r, c, opp):
                 blocks.append(pos)
+            elif self._is_fork_threat(r, c, cur) or self._is_fork_threat(r, c, opp):
+                threats.append(pos)
             else:
                 normal.append(pos)
 
         if wins:
             return wins
 
-        remaining = max_moves - len(blocks)
+        remaining = max_moves - len(blocks) - len(threats)
         if remaining > 0 and normal:
             # Sửa lại hàm sort:
             # Ưu tiên 1: Điểm nóng (self._cand_refs lớn nhất - đông quân cờ xung quanh nhất)
@@ -267,8 +322,10 @@ class Board:
             ), reverse=True)
             
             normal = normal[:remaining]
+        elif remaining <= 0:
+            normal = []
 
-        return blocks + normal
+        return blocks + threats + normal
 
     def evaluate_position(self, r, c, player):
         """Đưa evaluate_position về cùng logic 'Phóng tia' để đảm bảo tính nhất quán."""
