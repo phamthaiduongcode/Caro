@@ -34,7 +34,8 @@ DEFAULT_WEIGHTS = {
 class CaroAI:
     def __init__(self, player_id, depth, weights=None):
         """
-        Args: player_id: 1 (X) hoặc 2 (O)
+        Args:
+            player_id: 1 (X) hoặc 2 (O)
             depth:     độ sâu tìm kiếm tối đa
             weights:   dict trọng số (dùng DEFAULT_WEIGHTS nếu None)
         """
@@ -68,7 +69,7 @@ class CaroAI:
     # ──────────────────────────────────────────────────────────
     # Giao diện chính
     # ──────────────────────────────────────────────────────────
-    def get_move(self, board, mode, time_limit=8.0):
+    def get_move(self, board, mode="alphabeta", time_limit=8.0):
         """
         Trả về: (best_move, best_score, nodes_visited, time_taken)
         time_limit=None → bỏ qua iterative deepening, chạy thẳng depth.
@@ -82,15 +83,6 @@ class CaroAI:
         self.opp_id    = 3 - self.player_id
         self.center    = board.size // 2
         self._ensure_center_weights(board.size)
-
-        # FIX #4 (tiếp): Tính center_weights ngay tại đây khi đã biết board.size thực tế.
-        size = board.size
-        ctr  = size // 2
-        cb   = self.weights.get("center_bonus", 40)
-        self.center_weights = [
-            [max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) for c in range(size)]
-            for r in range(size)
-        ]
 
         legal_moves = board.get_legal_moves()
         if not legal_moves:
@@ -117,7 +109,7 @@ class CaroAI:
 
         # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
         # Sửa: Chỉ dùng Depth chẵn để tránh Horizon Effect (2, 4)
-        search_range = [self.depth] if self.time_limit is None else range(2, self.depth + 1, 2)
+        search_range = [self.depth] if self.time_limit is None else range(1, self.depth + 1)
 
         for current_depth in search_range:
             depth_best_move  = None
@@ -131,6 +123,7 @@ class CaroAI:
                         raise SearchTimeout()
 
                     board.make_move(*move)
+                    # Đoạn code cũ trong get_move
                     if mode == "minimax":
                         score = self.minimax(board, current_depth - 1, False, ply=1)
                     else:
@@ -172,7 +165,7 @@ class CaroAI:
     # Alpha-Beta
     # ──────────────────────────────────────────────────────────
     # ──────────────────────────────────────────────────────────
-    # Alpha-Beta 
+    # Alpha-Beta (Đã tối ưu: Move Ordering với TT-Move)
     # ──────────────────────────────────────────────────────────
     def alpha_beta(self, board, depth, alpha, beta, is_maximizing, ply=0, use_pvs=True):
         self.nodes_visited += 1
