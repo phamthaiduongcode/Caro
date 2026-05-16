@@ -137,12 +137,28 @@ class CaroAI:
         # BƯỚC 0: Kiểm tra nước thắng ngay (depth=1)
         for move in legal_moves:
             if board.fast_check_win(move[0], move[1], self.player_id):
-                return move, 1_000_000, 1, time.time() - self.start_time # ply=0 win
+                duration = time.time() - self.start_time
+                if log_path:
+                    try:
+                        log_ai_move(log_path, [
+                            'X' if self.player_id == 1 else 'O', str(move),
+                            1000000, 1, round(duration, 4), 1
+                        ])
+                    except: pass
+                return move, 1_000_000, 1, duration # ply=0 win
 
         # BƯỚC 0.5: Chặn đối thủ thắng ngay (Bắt buộc phải chặn trước khi nghĩ đến Fork)
         for move in legal_moves:
             if board.fast_check_win(move[0], move[1], self.opp_id):
-                return move, 950_000, 1, time.time() - self.start_time
+                duration = time.time() - self.start_time
+                if log_path:
+                    try:
+                        log_ai_move(log_path, [
+                            'X' if self.player_id == 1 else 'O', str(move),
+                            950000, 1, round(duration, 4), 1
+                        ])
+                    except: pass
+                return move, 950_000, 1, duration
 
         final_best_move  = legal_moves[0]
         final_best_score = -math.inf
