@@ -4,18 +4,28 @@ import os
 def log_game_result(file_path, data):
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     file_exists = os.path.isfile(file_path)
-    with open(file_path, mode='a', newline='') as f:
+    with open(file_path, mode='a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(['Timestamp', 'Winner', 'Moves', 'Duration'])
+            writer.writerow(['Winner', 'Moves', 'Duration'])
         writer.writerow(data)
 
 def log_benchmark_step(file_path, data):
     """Ghi log chi tiết từng bước đi cho mục đích benchmark."""
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     file_exists = os.path.isfile(file_path)
-    with open(file_path, mode='a', newline='') as f:
+    with open(file_path, mode='a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow(['Turn', 'Algorithm', 'Depth', 'Nodes_Visited', 'Time_Seconds', 'Score', 'Move'])
+        writer.writerow(data)
+
+def log_ai_move(file_path, data):
+    """Ghi log chi tiết từng nước đi của AI vào file csv."""
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    file_exists = os.path.isfile(file_path)
+    with open(file_path, mode='a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(['Player', 'Move', 'Score', 'Nodes', 'Time_Seconds', 'Depth'])
         writer.writerow(data)

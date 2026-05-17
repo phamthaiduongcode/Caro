@@ -1,5 +1,8 @@
 import random
 
+# Chia sẻ bảng Zobrist để tránh khởi tạo lại tốn kém khi copy board (đặc biệt quan trọng với 15x15)
+_ZOBRIST_CACHE = {}
+
 class Board:
     DIRECTIONS = [(0, 1), (1, 0), (1, 1), (1, -1)]
     _NEIGHBOR_OFFSETS = [(dr, dc) for dr in range(-2, 3) for dc in range(-2, 3) if dr or dc]
@@ -18,8 +21,14 @@ class Board:
         self.history = []
         self.current_score = 0
 
-        self.zobrist_table = [[[random.getrandbits(64) for _ in range(3)]
-                               for _ in range(size)] for _ in range(size)]
+        # Sử dụng cache cho zobrist_table để tối ưu tốc độ khởi tạo và copy()
+        if size not in _ZOBRIST_CACHE:
+            _ZOBRIST_CACHE[size] = [
+                [[random.getrandbits(64) for _ in range(3)]
+                 for _ in range(size)] for _ in range(size)
+            ]
+        self.zobrist_table = _ZOBRIST_CACHE[size]
+        
         self.zobrist_side = random.getrandbits(64)
         self.current_hash = 0
         for r in range(size):
@@ -64,8 +73,28 @@ class Board:
     def get_hash(self):
         return self.current_hash
 
-    def _compute_score_delta(self, row, col, player) -> int:
-        opp  = 3 - player
+    def _get_window_score(self, p_cnt, o_cnt, is_blocked_start, is_blocked_end, is_ai):
+        """Hàm lượng giá cửa sổ thông minh: Phân biệt Open/Half/Blocked."""
+        if p_cnt > 0 and o_cnt > 0: return 0
+        
+        count = p_cnt
+        if count == 0: return 0
+        if count >= self.win_condition: return self.WIN_SCORE
+
+        # Nếu bị chặn cả 2 đầu -> Cửa sổ này vô dụng (trừ khi đã thắng)
+        if is_blocked_start and is_blocked_end: return 0
+
+        # Phân loại dựa trên số đầu trống
+        is_open = not is_blocked_start and not is_blocked_end
+        
+        if count == 3:
+            return self.OPEN3_WIN_VAL if is_open else self.HALF3_WIN_VAL
+        if count == 2:
+            return self.OPEN2_WIN_VAL if is_open else self.HALF2_WIN_VAL
+        return 10 # count == 1
+
+    def _compute_score_delta(self, row, col, player_moving) -> int:
+        opp  = 3 - player_moving
         delta = 0
         wc    = self.win_condition
         size  = self.size
@@ -74,31 +103,52 @@ class Board:
         OSCORE = self._OSCORE_TABLE
 
         for dr, dc in self.DIRECTIONS:
-            for offset in range(wc):
-                sr = row - offset * dr;  sc = col - offset * dc
-                er = sr + (wc-1) * dr;   ec = sc + (wc-1) * dc
-                if not (0 <= sr < size and 0 <= sc < size and
-                        0 <= er < size and 0 <= ec < size):
-                    continue
-
-                p_cnt = o_cnt = 0
-                for i in range(wc):
-                    cell = grid[(sr + i*dr)*size + sc + i*dc]
-                    if   cell == player: p_cnt += 1
-                    elif cell == opp:    o_cnt += 1
-
-                if o_cnt == 0 and p_cnt > 0:
-                    wd = SCORE[p_cnt+1] - SCORE[p_cnt]
-                elif p_cnt == 0 and o_cnt > 0:
-                    wd = -OSCORE[o_cnt]
+            # Tối ưu: Lấy giá trị các ô xung quanh vào 1 list duy nhất để giảm slicing/allocation
+            line_vals = []
+            for i in range(-wc, wc + 1):
+                r, c = row + i*dr, col + i*dc
+                if 0 <= r < size and 0 <= c < size:
+                    line_vals.append(grid[r*size + c])
                 else:
-                    continue
+                    line_vals.append(-1) # Biên bàn cờ tính là chặn
 
-                delta += wd if player == 2 else -wd
+            # Quét các cửa sổ chứa ô vừa đánh (index wc trong line_vals)
+            for start in range(1, wc + 1):
+                end = start + wc
+                
+                p1_cnt = 0
+                p2_cnt = 0
+                for k in range(start, end):
+                    val = line_vals[k]
+                    if val == 1: p1_cnt += 1
+                    elif val == 2: p2_cnt += 1
+                
+                if p1_cnt > 0 and p2_cnt > 0:
+                    continue
+                
+                for p_idx in (1, 2):
+                    if (p_idx == 1 and p2_cnt > 0) or (p_idx == 2 and p1_cnt > 0):
+                        continue
+                    
+                    other, is_ai = 3 - p_idx, (p_idx == 2)
+                    cnt = p1_cnt if p_idx == 1 else p2_cnt
+                    b_s = (line_vals[start-1] == other or line_vals[start-1] == -1)
+                    b_e = (line_vals[end] == other or line_vals[end] == -1)
+
+                    if player_moving == p_idx:
+                        s_before = self._get_window_score(cnt, 0, b_s, b_e, True)
+                        s_after  = self._get_window_score(cnt + 1, 0, b_s, b_e, True)
+                    else:
+                        if cnt == 0: continue
+                        s_before = self._get_window_score(cnt, 0, b_s, b_e, True)
+                        s_after  = 0
+                    
+                    wd = s_after - s_before
+                    delta += wd * multiplier
 
         ctr = size >> 1
         center_val = max(0, 40 - (abs(row-ctr) + abs(col-ctr)) * 3)
-        delta += center_val if player == 2 else -center_val
+        delta += center_val if player_moving == 2 else -center_val
         return delta
 
     def make_move(self, row, col) -> bool:
@@ -113,7 +163,8 @@ class Board:
         self.current_hash ^= zt[row][col][self.current_player]
         self.current_hash ^= self.zobrist_side
         self.current_score += delta
-        self.history.append((row, col, delta))
+        # TỐI ƯU: Lưu old_refs để khôi phục trong undo_move mà không cần tính lại neighbor
+        self.history.append((row, col, delta, self._cand_refs[idx]))
         self.current_player = 3 - self.current_player
         self._cand_refs[idx] = 0
         self._candidates.discard((row, col))
@@ -124,7 +175,7 @@ class Board:
         if not self.history:
             return False
 
-        row, col, delta = self.history.pop()
+        row, col, delta, old_refs = self.history.pop()
         idx  = row * self.size + col
         zt   = self.zobrist_table
         self.current_hash ^= zt[row][col][self.grid[idx]]
@@ -134,20 +185,16 @@ class Board:
         self.current_score -= delta
         self.current_player = 3 - self.current_player
         self._remove_neighbors(row, col)
-        size = self.size
-        grid = self.grid
-        ref  = sum(1 for dr, dc in self._NEIGHBOR_OFFSETS
-                   if 0 <= row+dr < size and 0 <= col+dc < size
-                   and grid[(row+dr)*size + col+dc] != 0)
-        if ref > 0:
-            self._cand_refs[idx] = ref
+        if old_refs > 0:
+            self._cand_refs[idx] = old_refs
             self._candidates.add((row, col))
         return True
 
     def check_win(self) -> int:
         if not self.history:
             return 0
-        last_r, last_c, _ = self.history[-1]
+        # Cập nhật để nhận đủ 4 giá trị (row, col, delta, old_refs) hoặc chỉ lấy 2 giá trị đầu
+        last_r, last_c = self.history[-1][:2]
         last_player = self.grid[last_r * self.size + last_c]
         if self._check_at(last_r, last_c):
             return last_player
@@ -185,36 +232,63 @@ class Board:
 
     MAX_MOVES = 20
 
-    def get_legal_moves(self) -> list:
+    def get_legal_moves(self, limit=True) -> list:
         if not self.history:
             return [(self.size // 2, self.size // 2)]
         if not self._candidates:
             return []
 
-        cur  = self.current_player
-        opp  = 3 - cur
-        ctr  = self.size >> 1
+        cur, opp = self.current_player, 3 - self.current_player
         size = self.size
+        ctr = size // 2
+        # Giữ khoảng 40 nước đi cho bàn cờ lớn để an toàn
+        max_moves = 20 if size <= 9 else 40
 
-        wins = []; blocks = []; normal = []
+        wins, blocks, normal_with_scores = [], [], []
+        
+        # Trích xuất tọa độ 2 nước cờ vừa được đánh gần nhất (Điểm nóng)
+        last_r, last_c = self.history[-1][:2]
+        prev_r, prev_c = self.history[-2][:2] if len(self.history) >= 2 else (last_r, last_c)
+
         for pos in self._candidates:
             r, c = pos
             if self.fast_check_win(r, c, cur):
                 wins.append(pos)
-            elif self.fast_check_win(r, c, opp):
+                continue
+            if self.fast_check_win(r, c, opp):
                 blocks.append(pos)
-            else:
-                normal.append(pos)
+                continue
+            
+            # --- TỐI ƯU LẠI MOVE ORDERING ---
+            # 1. Khoảng cách tới vùng giao tranh (nước vừa đánh của mình & đối thủ)
+            dist_to_last = max(abs(r - last_r), abs(c - last_c))
+            dist_to_prev = max(abs(r - prev_r), abs(c - prev_c))
+            min_dist_to_action = min(dist_to_last, dist_to_prev)
+            
+            # 2. Vị trí có nhiều quân lân cận (vùng đông quân)
+            refs = self._cand_refs[r * size + c]
+            
+            # 3. Khoảng cách tới trung tâm (chỉ làm tiêu chí phụ)
+            dist_to_center = abs(r - ctr) + abs(c - ctr)
+            
+            # Điểm: Càng sát "điểm nóng" điểm càng cao. Tính toán O(1) nên cực nhanh.
+            score = (15 - min_dist_to_action) * 100 + (refs * 10) - dist_to_center
+            
+            normal_with_scores.append((pos, score))
 
         if wins:
             return wins
 
-        remaining = self.MAX_MOVES - len(blocks)
-        if remaining > 0 and normal:
-            normal.sort(key=lambda p: -(size - abs(p[0]-ctr) - abs(p[1]-ctr)))
-            normal = normal[:remaining]
-
-        return blocks + normal
+        # Sắp xếp các nước đi bình thường theo độ ưu tiên giảm dần
+        normal_with_scores.sort(key=lambda x: x[1], reverse=True)
+        normal = [x[0] for x in normal_with_scores]
+        
+        result = blocks + normal
+        
+        # Nếu đang ở Root Node (limit=False), không cắt bỏ để đánh giá toàn diện
+        if not limit:
+            return result
+        return result[:max_moves]
 
     def evaluate_position(self, r, c, player):
         score = 0; opp = 3 - player

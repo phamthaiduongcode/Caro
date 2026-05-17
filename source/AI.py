@@ -1,5 +1,6 @@
 import math
 import time
+from source.utils import log_ai_move
 
 class SearchTimeout(Exception):
     """Ngoại lệ tùy chỉnh để dừng tìm kiếm khi hết thời gian."""
@@ -32,7 +33,7 @@ DEFAULT_WEIGHTS = {
 
 
 class CaroAI:
-    def __init__(self, player_id, depth=3, weights=None):
+    def __init__(self, player_id, depth, weights=None):
         """
         Args:
             player_id: 1 (X) hoặc 2 (O)
@@ -55,6 +56,11 @@ class CaroAI:
         self.time_limit        = 0
         self.transposition_table = {}
 
+    def reset(self):
+        """Xóa cache và trạng thái tìm kiếm cho ván mới."""
+        self.transposition_table = {}
+        self.nodes_visited = 0
+
     def _ensure_center_weights(self, size):
         if self._center_weights_size == size:
             return
@@ -69,7 +75,7 @@ class CaroAI:
     # ──────────────────────────────────────────────────────────
     # Giao diện chính
     # ──────────────────────────────────────────────────────────
-    def get_move(self, board, mode="alphabeta", time_limit=10.0):
+    def get_move(self, board, mode="alpha_beta", time_limit= 20.0, log_path=None):
         """
         Trả về: (best_move, best_score, nodes_visited, time_taken)
         time_limit=None → bỏ qua iterative deepening, chạy thẳng depth.
@@ -77,38 +83,67 @@ class CaroAI:
         self.nodes_visited       = 0
         self.start_time          = time.time()
         self.time_limit          = time_limit
-        self.transposition_table = {}
 
         self.player_id = board.current_player
         self.opp_id    = 3 - self.player_id
         self.center    = board.size // 2
         self._ensure_center_weights(board.size)
 
-        legal_moves = board.get_legal_moves()
+        # ĐỔI THÀNH limit=False TẠI ROOT ĐỂ KHÔNG BỎ SÓT NƯỚC Ở GÓC
+        legal_moves = board.get_legal_moves(limit=False) 
         if not legal_moves:
             return None, 0, 0, 0
 
-        # get_legal_moves() đã sort theo priority (nước thắng=3, nước chặn=2, thường=0).
-        # KHÔNG sort lại theo center — làm vậy sẽ xóa mất ordering tốt đó.
-        # Center bonus đã được tính trong heuristic() nên không cần ưu tiên ở đây.
+        # TỐI ƯU ROOT: Đánh giá sơ bộ TOÀN BỘ nước đi
+        if len(legal_moves) > 1:
+            move_evals = []
+            for m in legal_moves:
+                board.make_move(*m)
+                val = self.heuristic(board)
+                board.undo_move()
+                move_evals.append((m, val))
+                
+            move_evals.sort(key=lambda x: x[1], reverse=True)
+            
+            # Cắt lấy top N nước TỐT NHẤT theo điểm thực tế chứ không phải theo vị trí trung tâm
+            top_n = 20 if board.size <= 9 else 40
+            legal_moves = [x[0] for x in move_evals][:top_n]
 
         # BƯỚC 0: Kiểm tra nước thắng ngay (depth=1)
         for move in legal_moves:
             if board.fast_check_win(move[0], move[1], self.player_id):
-                return move, 1_000_000, 1, time.time() - self.start_time # ply=0 win
+                duration = time.time() - self.start_time
+                if log_path:
+                    try:
+                        log_ai_move(log_path, [
+                            'X' if self.player_id == 1 else 'O', str(move),
+                            1_000_000, 1, round(duration, 4), 1
+                        ])
+                    except: pass
+                return move, 1_000_000, 1, duration # ply=0 win
 
         # BƯỚC 0.5: Chặn đối thủ thắng ngay (Bắt buộc phải chặn trước khi nghĩ đến Fork)
         for move in legal_moves:
             if board.fast_check_win(move[0], move[1], self.opp_id):
-                return move, 950_000, 1, time.time() - self.start_time
+                duration = time.time() - self.start_time
+                if log_path:
+                    try:
+                        log_ai_move(log_path, [
+                            'X' if self.player_id == 1 else 'O', str(move),
+                            950_000, 1, round(duration, 4), 1
+                        ])
+                    except: pass
+                return move, 950_000, 1, duration
 
         final_best_move  = legal_moves[0]
         final_best_score = -math.inf
 
+        achieved_depth = 0
         root_beta = math.inf
 
         # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
         # Sửa: Chỉ dùng Depth chẵn để tránh Horizon Effect (2, 4)
+        # Sử dụng bước nhảy 2 để đảm bảo kết thúc ở các ply chẵn, giúp heuristic ổn định hơn
         search_range = [self.depth] if self.time_limit is None else range(2, self.depth + 1, 2)
 
         for current_depth in search_range:
@@ -123,10 +158,11 @@ class CaroAI:
                         raise SearchTimeout()
 
                     board.make_move(*move)
+                    # Đoạn code cũ trong get_move
                     if mode == "minimax":
                         score = self.minimax(board, current_depth - 1, False, ply=1)
                     else:
-                        score = self.alpha_beta(board, current_depth - 1, alpha, root_beta, False, ply=1, use_pvs=(mode == "alphabeta"))
+                        score = self.alpha_beta(board, current_depth - 1, alpha, root_beta, False, ply=1, use_pvs=(mode == "alpha_beta"))
                     board.undo_move()
 
                     if score > depth_best_score:
@@ -139,6 +175,7 @@ class CaroAI:
                 # [QUAN TRỌNG] Chỉ cập nhật kết quả cuối cùng khi đã hoàn thành trọn vẹn độ sâu này
                 final_best_move  = depth_best_move
                 final_best_score = depth_best_score
+                achieved_depth = current_depth
 
                 # Move ordering: đưa nước tốt nhất của độ sâu vừa hoàn thành lên đầu cho lần lặp kế tiếp
                 if final_best_move in legal_moves:
@@ -152,6 +189,16 @@ class CaroAI:
                 break
 
         duration = time.time() - self.start_time
+
+        # Ghi log vào file moves.csv (chung cho cả Human và AI)
+        if log_path:
+            try:
+                log_ai_move(log_path, [
+                    'X' if self.player_id == 1 else 'O', str(final_best_move),
+                    final_best_score, self.nodes_visited, round(duration, 4), achieved_depth
+                ])
+            except: pass
+
         return final_best_move, final_best_score, self.nodes_visited, duration
 
     def _check_timeout(self):
