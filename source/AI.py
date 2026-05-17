@@ -350,3 +350,10 @@ class CaroAI:
         if self.player_id == 1:
             return -board.current_score
         return board.current_score
+
+    def reset(self):
+        """
+        Gọi khi bắt đầu ván mới.
+        """
+        self.transposition_table.clear()
+        self.nodes_visited = 0 
