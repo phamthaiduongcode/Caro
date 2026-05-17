@@ -95,8 +95,6 @@ class Board:
         wc    = self.win_condition
         size  = self.size
         grid  = self.grid
-        SCORE  = self._SCORE_TABLE
-        OSCORE = self._OSCORE_TABLE
 
         for dr, dc in self.DIRECTIONS:
             # "Phóng tia": Lấy dữ liệu 1 đường thẳng duy nhất chứa ô vừa đánh
