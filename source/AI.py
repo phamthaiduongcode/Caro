@@ -1,76 +1,65 @@
 import math
 import time
+import random
 from source.utils import log_ai_move
 
 class SearchTimeout(Exception):
     """Ngoại lệ tùy chỉnh để dừng tìm kiếm khi hết thời gian."""
     pass
 
-
-# ─────────────────────────────────────────────────────────────
-# Trọng số mặc định (baseline đã được căn chỉnh tay)
-# Đây là điểm khởi đầu cho GA training.
-# ─────────────────────────────────────────────────────────────
-DEFAULT_WEIGHTS = {
-    # Tấn công (AI)
-    "open3":        250_000,   # _XXX_  → Thắng chắc trong luật 4
-    "half3":        100_000,   # XXX_   → Buộc phải chặn ngay trong luật 4
-    "broken4":      100_000,   # XX_X   → Nguy hiểm tương đương half3
-    "open2":          5_000,   # _XX_
-    "half2":          1_000,   # XX_
-    "broken3":       10_000,   # X_X_
-    "open1":             10,   # _X_
-
-    # Hệ số phòng thủ: nhân vào điểm của đối thủ
-    # > 1.0: thiên về phòng thủ; < 1.0: thiên về tấn công
-    # Không có luật chặn 2 đầu → open3 của địch rất nguy hiểm → nên > 1.0
-    "defense_mult":    1.20,
-
-    # Bonus vị trí: cộng thêm cho quân gần tâm
-    "center_bonus":      40,
-    "fork_bonus":   500_000,   # 2 open3 cùng lúc = gần như thắng chắc
-}
-
-
 class CaroAI:
-    def __init__(self, player_id, depth, weights=None):
+    def __init__(self, player_id, depth):
         """
         Args:
             player_id: 1 (X) hoặc 2 (O)
             depth:     độ sâu tìm kiếm tối đa
-            weights:   dict trọng số (dùng DEFAULT_WEIGHTS nếu None)
         """
         self.player_id = player_id
         self.opp_id    = 3 - player_id
         self.depth     = depth
-        self.weights = weights if weights is not None else dict(DEFAULT_WEIGHTS)
-
-        # ─── TỐI ƯU 3: center_weights được khởi tạo lazy theo board size ───
-        # Không hard-code size=9 nữa. Tính lại khi size thay đổi.
-        self._center_weights_size = None
-        self.center_weights = None
 
         self.nodes_visited     = 0
-        self.center            = 0
         self.start_time        = 0
         self.time_limit        = 0
-        self.transposition_table = {}
+        self.transposition_table = {}  # Khởi tạo một lần duy nhất tại __init__
 
-    def reset(self):
-        """Xóa cache và trạng thái tìm kiếm cho ván mới."""
-        self.transposition_table = {}
-        self.nodes_visited = 0
+    def _get_opening_move(self, board):
+        """
+        Xử lý khai cuộc cứng cho 2 nước đầu tiên.
+        Trả về (row, col) nếu đang ở giai đoạn khai cuộc, ngược lại trả về None.
+        """
+        moves_made = len(board.history)
+        ctr = board.size // 2
 
-    def _ensure_center_weights(self, size):
-        if self._center_weights_size == size:
-            return
-        ctr = size // 2
-        cb  = self.weights.get("center_bonus", 40)
-        self.center_weights = [
-            [max(0, cb - (abs(r - ctr) + abs(c - ctr)) * 3) for c in range(size)]
-            for r in range(size)
-        ]
-        self._center_weights_size = size
+        # Trường hợp 1: AI được đi nước đầu tiên (AI là X)
+        if moves_made == 0:
+            score = board.evaluate_position(ctr, ctr, self.player_id)
+            return (ctr, ctr), score
+
+        # Trường hợp 2: AI đi nước thứ 2 (AI là O, đáp trả nước đầu của X)
+        if moves_made == 1:
+            x_row, x_col, _ = board.history[0]
+            
+            # Chiến thuật: Ưu tiên chặn chéo (Indirect) trước vì tạo cấu trúc linh hoạt hơn
+            diagonal_replies = [
+                (x_row-1, x_col-1), (x_row-1, x_col+1),
+                (x_row+1, x_col-1), (x_row+1, x_col+1)
+            ]
+            straight_replies = [
+                (x_row-1, x_col), (x_row+1, x_col),
+                (x_row, x_col-1), (x_row, x_col+1)
+            ]
+            
+            ctr = board.size // 2
+            # Lọc các ô hợp lệ
+            valid_diag = [(r, c) for r, c in diagonal_replies if 0 <= r < board.size and 0 <= c < board.size]
+            
+            if valid_diag:
+                # Chọn ô chéo gần tâm nhất (ví dụ: nếu X ở 13,13 thì 12,12 gần tâm hơn 14,14)
+                best = min(valid_diag, key=lambda p: abs(p[0] - ctr) + abs(p[1] - ctr))
+                return best, board.evaluate_position(best[0], best[1], self.player_id)
+
+        return None, 0
 
     # ──────────────────────────────────────────────────────────
     # Giao diện chính
@@ -83,31 +72,34 @@ class CaroAI:
         self.nodes_visited       = 0
         self.start_time          = time.time()
         self.time_limit          = time_limit
+        
+        # Kiểm tra kích thước TT để tránh tràn RAM (giới hạn 1 triệu entry)
+        if len(self.transposition_table) > 1_000_000:
+            self.transposition_table.clear()
 
         self.player_id = board.current_player
         self.opp_id    = 3 - self.player_id
-        self.center    = board.size // 2
-        self._ensure_center_weights(board.size)
 
-        # ĐỔI THÀNH limit=False TẠI ROOT ĐỂ KHÔNG BỎ SÓT NƯỚC Ở GÓC
-        legal_moves = board.get_legal_moves(limit=False) 
+        # 1. KIỂM TRA OPENING BOOK TRƯỚC TIÊN
+        opening_move, opening_score = self._get_opening_move(board)
+        if opening_move is not None:
+            duration = time.time() - self.start_time
+            if log_path:
+                try:
+                    log_ai_move(log_path, [
+                        'X' if self.player_id == 1 else 'O', str(opening_move),
+                        opening_score, 1, round(duration, 4), 1
+                    ])
+                except: pass
+            return opening_move, opening_score, 0, duration
+
+        legal_moves = board.get_legal_moves()
         if not legal_moves:
             return None, 0, 0, 0
 
-        # TỐI ƯU ROOT: Đánh giá sơ bộ TOÀN BỘ nước đi
-        if len(legal_moves) > 1:
-            move_evals = []
-            for m in legal_moves:
-                board.make_move(*m)
-                val = self.heuristic(board)
-                board.undo_move()
-                move_evals.append((m, val))
-                
-            move_evals.sort(key=lambda x: x[1], reverse=True)
-            
-            # Cắt lấy top N nước TỐT NHẤT theo điểm thực tế chứ không phải theo vị trí trung tâm
-            top_n = 20 if board.size <= 9 else 40
-            legal_moves = [x[0] for x in move_evals][:top_n]
+        # get_legal_moves() đã sort theo priority (nước thắng=3, nước chặn=2, thường=0).
+        # KHÔNG sort lại theo center — làm vậy sẽ xóa mất ordering tốt đó.
+        # Center bonus đã được tính trong heuristic() nên không cần ưu tiên ở đây.
 
         # BƯỚC 0: Kiểm tra nước thắng ngay (depth=1)
         for move in legal_moves:
@@ -117,7 +109,7 @@ class CaroAI:
                     try:
                         log_ai_move(log_path, [
                             'X' if self.player_id == 1 else 'O', str(move),
-                            1_000_000, 1, round(duration, 4), 1
+                            1000000, 1, round(duration, 4), 1
                         ])
                     except: pass
                 return move, 1_000_000, 1, duration # ply=0 win
@@ -130,7 +122,7 @@ class CaroAI:
                     try:
                         log_ai_move(log_path, [
                             'X' if self.player_id == 1 else 'O', str(move),
-                            950_000, 1, round(duration, 4), 1
+                            950000, 1, round(duration, 4), 1
                         ])
                     except: pass
                 return move, 950_000, 1, duration
@@ -143,8 +135,7 @@ class CaroAI:
 
         # Nếu time_limit=None → chạy đúng self.depth (dùng cho training)
         # Sửa: Chỉ dùng Depth chẵn để tránh Horizon Effect (2, 4)
-        # Sử dụng bước nhảy 2 để đảm bảo kết thúc ở các ply chẵn, giúp heuristic ổn định hơn
-        search_range = [self.depth] if self.time_limit is None else range(2, self.depth + 1, 2)
+        search_range = [self.depth] if self.time_limit is None else range(2, self.depth + 2, 2)
 
         for current_depth in search_range:
             depth_best_move  = None
@@ -310,8 +301,11 @@ class CaroAI:
                 else "LOWER" if best_score >= beta_orig
                 else "EXACT")
                 
-        # [MỚI] Lưu best_move_found vào TT thay vì để None
-        self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
+        # [SỬA LỖI] Chỉ ghi đè nếu kết quả mới có độ sâu tính toán lớn hơn hoặc bằng kết quả cũ
+        if (board_hash not in self.transposition_table or 
+            depth >= self.transposition_table[board_hash][0]):
+            self.transposition_table[board_hash] = (depth, flag, best_score, best_move_found)
+            
         return best_score
     # ──────────────────────────────────────────────────────────
     # Minimax thuần túy
