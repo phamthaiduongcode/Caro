@@ -1,23 +1,28 @@
 # Caro
-Gomoku (Caro) AI Project
+Dự án Game Caro (Gomoku) tích hợp AI sử dụng thuật toán Minimax, Alpha-Beta Pruning và tối ưu hóa trọng số bằng Genetic Algorithm.
 
-## Cấu trúc thư mục
-- `play.py`: Điểm khởi chạy chương trình.
-- `requirements.txt`: Các thư viện cần thiết.
-- `source/`: Chứa logic xử lý trò chơi và AI.
-    - `board.py`: Logic bàn cờ và luật chơi.
-    - `AI.py`: Thuật toán Minimax, Alpha-Beta Pruning.
-    - `utils.py`: Tiện ích lưu log CSV.
-    - `benchmark.py`: So sánh hiệu năng giữa các thuật toán.
-- `gui/`: Giao diện người dùng.
-    - `interface.py`: Xử lý giao diện chính bằng Pygame.
-    - `button.py`: Widget nút bấm.
-    - `analysis.py`: Vẽ biểu đồ kết quả benchmark.
-- `logs/`: Chứa các file log kết quả (tự động tạo).
-- `experiments/`: Chứa hình ảnh kết quả thực nghiệm.
-
-## Hướng dẫn cài đặt
+## 1. Cài đặt
 ```bash
+# Clone dự án và truy cập vào thư mục
+cd Caro
+
+# Tạo môi trường ảo
+python -m venv venv
+
+# Kích hoạt môi trường ảo
+# Windows:
+venv\Scripts\activate
+# Linux/MacOS:
+source venv/bin/activate
+
+# Cài đặt thư viện
 pip install -r requirements.txt
+```
+
+## 2. Cách chạy chương trình
+
+### Chơi Game (GUI)
+Giao diện chính để đấu với AI hoặc chơi 2 người:
+```bash
 python play.py
 ```
