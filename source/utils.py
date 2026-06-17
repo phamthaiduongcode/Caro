@@ -29,3 +29,15 @@ def log_ai_move(file_path, data):
         if not file_exists:
             writer.writerow(['Player', 'Move', 'Score', 'Nodes', 'Time_Seconds', 'Depth'])
         writer.writerow(data)
+
+def pop_last_log_lines(file_path, count):
+    """Xóa n dòng cuối cùng khỏi file log (dùng khi Undo)."""
+    if not os.path.exists(file_path):
+        return
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        if len(lines) > count:
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                f.writelines(lines[:-count])
+    except: pass
