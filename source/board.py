@@ -221,7 +221,7 @@ class Board:
             self._cand_refs[idx] = ref
             self._candidates.add((row, col))
         return True
-
+    
     def check_win(self) -> int:
         if not self.history:
             return 0
