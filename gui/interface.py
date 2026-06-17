@@ -895,14 +895,29 @@ class GameScreen:
         if action == "restart":  self.restart();        return None
         if action == "new_game": self.setting.close();  return "new_game"
         if action == "surrender":
-            winner = PLAYER_O if self.current == PLAYER_X else PLAYER_X
-            self.winner    = winner
-            self.game_over = True
-            self._add_score(winner)
-            self.setting.close()
-            # FIX: truyền mode và human_side
-            self.win_screen.show(winner, mode=self.mode, human_side=self.human_side)
-            return None
+            if self.mode == "Ai" : 
+                if self.ai_thinking : 
+                    return 
+                if self.current != self.human_side : 
+                    return 
+                else : 
+                    winner = PLAYER_O if self.current == PLAYER_X else PLAYER_X
+                    self.winner    = winner
+                    self.game_over = True
+                    self._add_score(winner)
+                    self.setting.close()
+                    # FIX: truyền mode và human_side
+                    self.win_screen.show(winner, mode=self.mode, human_side=self.human_side)
+                    return None
+            else : 
+                winner = PLAYER_O if self.current == PLAYER_X else PLAYER_X
+                self.winner    = winner
+                self.game_over = True
+                self._add_score(winner)
+                self.setting.close()
+                # FIX: truyền mode và human_side
+                self.win_screen.show(winner, mode=self.mode, human_side=self.human_side)
+                return None
 
         if not self.game_over:
             if self.btn_setting.is_clicked(event):
