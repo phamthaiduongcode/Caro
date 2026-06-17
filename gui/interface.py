@@ -836,6 +836,7 @@ class GameScreen:
         self.ai_result      = move
         self.ai_move_score  = score
         self.ai_move_time   = duration
+        self.ai_move_nodes  = nodes
 
     def _trigger_ai(self):
         if self.ai_thinking or self.game_over:
@@ -852,6 +853,7 @@ class GameScreen:
         move = self.ai_result
         score = getattr(self, "ai_move_score", "")
         think_time = getattr(self, "ai_move_time", 0.0)
+        nodes = getattr(self, "ai_move_nodes", "")
         self.ai_thinking = False
         self.ai_result   = None
         if move is None or self.game_over:
@@ -867,7 +869,7 @@ class GameScreen:
         try:
             log_move(self.move_log_path, [
                 self.turn_no, 'AI', p_label, f"({row}, {col})",
-                round(think_time, 4), score
+                round(think_time, 4), score, nodes, self.ai_depth
             ])
         except Exception:
             pass
