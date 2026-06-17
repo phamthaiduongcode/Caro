@@ -900,7 +900,7 @@ class GameScreen:
         try:
             log_move(self.move_log_path, [
                 self.turn_no, player_label, p_label, f"({row}, {col})",
-                round(think_time, 4), self.board_obj.current_score
+                round(think_time, 4), self.board_obj.current_score, '', ''
             ])
         except Exception:
             pass

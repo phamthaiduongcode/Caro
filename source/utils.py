@@ -48,7 +48,7 @@ def log_move(file_path, data):
     with open(file_path, mode='a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(['Turn', 'Player', 'Symbol', 'Move', 'Time_Seconds', 'Score'])
+            writer.writerow(['Turn', 'Player', 'Symbol', 'Move', 'Time_Seconds', 'Score', 'Nodes_Visited', 'Depth'])
         writer.writerow(data)
 
 def pop_last_log_lines(file_path, count):
