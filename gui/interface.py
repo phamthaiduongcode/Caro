@@ -1,4 +1,3 @@
-# pyrefly: ignore [missing-import]
 import pygame
 import os
 import sys
@@ -934,6 +933,10 @@ class GameScreen:
             # Chặn undo nếu hiện tại không phải lượt người
             if self.current != self.human_side:
                 return
+            steps = 2 if len(self.board_obj.history) >= 2 else 1
+            for _ in range(steps):
+                self.board_obj.undo_move()
+        if self.mode == "Ai":
             steps = 2 if len(self.board_obj.history) >= 2 else 1
             for _ in range(steps):
                 self.board_obj.undo_move()

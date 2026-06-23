@@ -328,30 +328,24 @@ class Board:
         return blocks + threats + normal
 
     def evaluate_position(self, r, c, player):
-        """Đưa evaluate_position về cùng logic 'Phóng tia' để đảm bảo tính nhất quán."""
-        score = 0
-        size, grid, wc = self.size, self.grid, self.win_condition
+        score = 0; opp = 3 - player
+        grid = self.grid; size = self.size; wc = self.win_condition
         for dr, dc in self.DIRECTIONS:
-            line = []
-            for i in range(-wc, wc + 1):
-                nr, nc = r + i*dr, c + i*dc
-                line.append(grid[nr*size + nc] if (0 <= nr < size and 0 <= nc < size) else -1)
-            
-            for start in range(1, wc + 1):
-                window = line[start : start + wc]
-                p1, p2 = window.count(1), window.count(2)
-                if p1 > 0 and p2 > 0: continue
-                
-                for p_idx in (1, 2):
-                    if (p_idx == 1 and p2 > 0) or (p_idx == 2 and p1 > 0): continue
-                    cnt, other, is_ai = (p1 if p_idx == 1 else p2), 3 - p_idx, (p_idx == 2)
-                    b_s = (line[start - 1] == other or line[start - 1] == -1)
-                    b_e = (line[start + wc] == other or line[start + wc] == -1)
-                    s = self._get_window_score(cnt, 0, b_s, b_e, is_ai)
-                    score += s if (is_ai == (player == 2)) else -s
-                    
+            for offset in range(wc):
+                sr, sc = r - offset*dr, c - offset*dc
+                er, ec = sr+(wc-1)*dr, sc+(wc-1)*dc
+                if not (0<=sr<size and 0<=sc<size and 0<=er<size and 0<=ec<size): continue
+                p_cnt = o_cnt = 0
+                for i in range(wc):
+                    cell = grid[(sr+i*dr)*size + sc+i*dc]
+                    if cell == player: p_cnt += 1
+                    elif cell == opp:  o_cnt += 1
+                if p_cnt > 0 and o_cnt == 0:
+                    score += (1000000 if p_cnt==wc else 10000 if p_cnt==wc-1 else 100 if p_cnt==wc-2 else 10)
+                elif o_cnt > 0 and p_cnt == 0:
+                    score -= (1200000 if o_cnt==wc else 12000 if o_cnt==wc-1 else 120 if o_cnt==wc-2 else 12)
         ctr = size >> 1
-        score += max(0, 40 - (abs(r - ctr) + abs(c - ctr)) * 3)
+        score += max(0, 40 - (abs(r-ctr)+abs(c-ctr))*3)
         return score
 
     def copy(self):
